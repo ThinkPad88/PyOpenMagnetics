@@ -14,7 +14,7 @@ json plot_core(json magneticJson, std::string outputPath) {
             : std::filesystem::path(outputPath);
         
         // Create the painter and paint the core only
-        OpenMagnetics::Painter painter(filePath, false, false, false);
+        OpenMagnetics::Painter painter(filePath);
         painter.paint_core(magnetic);
         
         // Export and get the SVG string
@@ -43,7 +43,7 @@ json plot_magnetic(json magneticJson, std::string outputPath) {
             : std::filesystem::path(outputPath);
         
         // Create the painter and paint the full magnetic (core, bobbin, coil)
-        OpenMagnetics::Painter painter(filePath, false, false, false);
+        OpenMagnetics::Painter painter(filePath);
         painter.paint_core(magnetic);
         painter.paint_bobbin(magnetic);
         painter.paint_coil_turns(magnetic);
@@ -73,9 +73,7 @@ json plot_magnetic_field(json magneticJson, json operatingPointJson, std::string
         std::filesystem::path filePath = outputPath.empty() 
             ? std::filesystem::temp_directory_path() / "pyom_plot_magnetic_field.svg"
             : std::filesystem::path(outputPath);
-        
-        // Create the painter (use BasicPainter by passing false for colorBar to get SVG content back)
-        OpenMagnetics::Painter painter(filePath, false, false, false);
+        OpenMagnetics::Painter painter(filePath);
         
         // Paint the magnetic field, core, and coil turns
         painter.paint_magnetic_field(operatingPoint, magnetic);
@@ -107,9 +105,7 @@ json plot_electric_field(json magneticJson, json operatingPointJson, std::string
         std::filesystem::path filePath = outputPath.empty() 
             ? std::filesystem::temp_directory_path() / "pyom_plot_electric_field.svg"
             : std::filesystem::path(outputPath);
-        
-        // Create the painter (use BasicPainter by passing false for colorBar to get SVG content back)
-        OpenMagnetics::Painter painter(filePath, false, false, false);
+        OpenMagnetics::Painter painter(filePath);
         
         // Paint the electric field, core, and coil turns
         painter.paint_electric_field(operatingPoint, magnetic);
@@ -142,7 +138,7 @@ json plot_wire(json wireDataJson, std::string outputPath) {
             : std::filesystem::path(outputPath);
         
         // Create the painter and paint the wire
-        OpenMagnetics::Painter painter(filePath, false, false, false);
+        OpenMagnetics::Painter painter(filePath);
         painter.paint_wire(wire);
         
         // Export and get the SVG string
@@ -171,7 +167,7 @@ json plot_bobbin(json magneticJson, std::string outputPath) {
             : std::filesystem::path(outputPath);
         
         // Create the painter and paint the core and bobbin
-        OpenMagnetics::Painter painter(filePath, false, false, false);
+        OpenMagnetics::Painter painter(filePath);
         painter.paint_core(magnetic);
         painter.paint_bobbin(magnetic);
         
