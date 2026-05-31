@@ -99,6 +99,48 @@ bool check_if_fits(json bobbinJson, double dimension, bool isHorizontalOrRadial)
     }
 }
 
+json create_simple_bobbin_from_core(json coreJson) {
+    try {
+        OpenMagnetics::Core core(coreJson, false, false, false);
+        auto bobbin = OpenMagnetics::Bobbin::create_quick_bobbin(core);
+
+        json result;
+        to_json(result, bobbin);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+json create_simple_bobbin_from_core_with_custom_thickness(json coreJson, double thickness) {
+    try {
+        OpenMagnetics::Core core(coreJson, false, false, false);
+        auto bobbin = OpenMagnetics::Bobbin::create_quick_bobbin(core, thickness);
+
+        json result;
+        to_json(result, bobbin);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+json create_simple_bobbin_from_core_with_custom_thicknesses(json coreJson, double wallThickness, double columnThickness) {
+    try {
+        OpenMagnetics::Core core(coreJson, false, false, false);
+        auto bobbin = OpenMagnetics::Bobbin::create_quick_bobbin(core, wallThickness, columnThickness);
+
+        json result;
+        to_json(result, bobbin);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
 void register_bobbin_bindings(py::module& m) {
     m.def("get_bobbins", &get_bobbins, "Retrieve all available bobbins as JSON objects");
     m.def("get_bobbin_names", &get_bobbin_names, "Retrieve list of all bobbin names");
@@ -108,6 +150,45 @@ void register_bobbin_bindings(py::module& m) {
     m.def("calculate_bobbin_data", &calculate_bobbin_data, "Calculate bobbin specifications");
     m.def("process_bobbin", &process_bobbin, "Process bobbin geometry");
     m.def("check_if_fits", &check_if_fits, "Check if winding fits in available space");
+
+    m.def("create_simple_bobbin_from_core", &create_simple_bobbin_from_core,
+        R"pbdoc(
+        Create a simple bobbin from core data.
+
+        Args:
+            core_json: JSON Core object.
+
+        Returns:
+            JSON Bobbin object.
+        )pbdoc",
+        py::arg("core_json"));
+
+    m.def("create_simple_bobbin_from_core_with_custom_thickness", &create_simple_bobbin_from_core_with_custom_thickness,
+        R"pbdoc(
+        Create a simple bobbin from core data with custom wall thickness.
+
+        Args:
+            core_json: JSON Core object.
+            thickness: Wall thickness in meters.
+
+        Returns:
+            JSON Bobbin object.
+        )pbdoc",
+        py::arg("core_json"), py::arg("thickness"));
+
+    m.def("create_simple_bobbin_from_core_with_custom_thicknesses", &create_simple_bobbin_from_core_with_custom_thicknesses,
+        R"pbdoc(
+        Create a simple bobbin from core data with custom wall and column thicknesses.
+
+        Args:
+            core_json: JSON Core object.
+            wall_thickness: Wall thickness in meters.
+            column_thickness: Column thickness in meters.
+
+        Returns:
+            JSON Bobbin object.
+        )pbdoc",
+        py::arg("core_json"), py::arg("wall_thickness"), py::arg("column_thickness"));
 }
 
 } // namespace PyMKF

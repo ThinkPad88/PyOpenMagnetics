@@ -236,6 +236,98 @@ json calculate_advised_magnetics_from_cache(json inputsJson, json filterFlowJson
     }
 }
 
+json calculate_advised_sections(json masJson, json patternJson, int repetitions) {
+    try {
+        OpenMagnetics::Mas mas(masJson);
+        std::vector<size_t> pattern;
+        for (auto& elem : patternJson) {
+            pattern.push_back(elem);
+        }
+        auto bobbin = mas.get_magnetic().get_coil().get_bobbin();
+        if (std::holds_alternative<std::string>(bobbin)) {
+            auto bobbinString = std::get<std::string>(bobbin);
+            if (bobbinString == "Dummy") {
+                mas.get_mutable_magnetic().get_mutable_coil().set_bobbin(
+                    OpenMagnetics::Bobbin::create_quick_bobbin(mas.get_mutable_magnetic().get_mutable_core()));
+            }
+        }
+        for (size_t windingIndex = 0; windingIndex < mas.get_magnetic().get_coil().get_functional_description().size(); ++windingIndex) {
+            mas.get_mutable_magnetic().get_mutable_coil().get_mutable_functional_description()[windingIndex].set_wire("Dummy");
+        }
+        auto sections = OpenMagnetics::CoilAdviser().get_advised_sections(mas, pattern, repetitions);
+        json result = json::array();
+        for (auto& section : sections) {
+            json aux;
+            to_json(aux, section);
+            result.push_back(aux);
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("calculate_advised_sections: ") + exc.what()}};
+    }
+}
+
+json calculate_advised_coil(json masJson) {
+    try {
+        OpenMagnetics::Settings::GetInstance().set_coil_delimit_and_compact(true);
+        OpenMagnetics::Mas mas(masJson);
+        for (size_t windingIndex = 0; windingIndex < mas.get_magnetic().get_coil().get_functional_description().size(); ++windingIndex) {
+            mas.get_mutable_magnetic().get_mutable_coil().get_mutable_functional_description()[windingIndex].set_wire("Dummy");
+        }
+        mas.get_mutable_magnetic().get_mutable_coil().set_turns_description(std::nullopt);
+        mas.get_mutable_magnetic().get_mutable_coil().set_layers_description(std::nullopt);
+        mas.get_mutable_magnetic().get_mutable_coil().set_sections_description(std::nullopt);
+        mas.get_mutable_magnetic().get_mutable_coil().set_groups_description(std::nullopt);
+        OpenMagnetics::CoilAdviser coilAdviser;
+        auto masMagneticsWithCoil = coilAdviser.get_advised_coil(mas, 1);
+        if (masMagneticsWithCoil.size() > 0) {
+            json result;
+            to_json(result, masMagneticsWithCoil[0]);
+            return result;
+        }
+        else {
+            return json{{"error", "No coil found"}};
+        }
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("calculate_advised_coil: ") + exc.what()}};
+    }
+}
+
+json calculate_advised_wires(json windingJson, json sectionJson, json currentJson, json solidInsulationRequirementsJson, double temperature, uint8_t numberSections, size_t maximumNumberResults, bool usePlanarWires) {
+    try {
+        OpenMagnetics::Settings::GetInstance().set_coil_delimit_and_compact(true);
+        OpenMagnetics::Winding winding(windingJson);
+        OpenMagnetics::WireSolidInsulationRequirements wireSolidInsulationRequirements(solidInsulationRequirementsJson);
+        Section section(sectionJson);
+        SignalDescriptor current(currentJson);
+        OpenMagnetics::WireAdviser wireAdviser;
+        wireAdviser.set_wire_solid_insulation_requirements(wireSolidInsulationRequirements);
+        std::vector<std::pair<OpenMagnetics::Winding, double>> windingsWithScoring;
+        if (usePlanarWires) {
+            windingsWithScoring = wireAdviser.get_advised_planar_wire(winding, section, current, temperature, numberSections, maximumNumberResults);
+        }
+        else {
+            windingsWithScoring = wireAdviser.get_advised_wire(winding, section, current, temperature, numberSections, maximumNumberResults);
+        }
+        json results;
+        results["data"] = json::array();
+        for (auto& [w, scoring] : windingsWithScoring) {
+            json result;
+            json windingJson;
+            to_json(windingJson, w);
+            result["winding"] = windingJson;
+            result["scoring"] = scoring;
+            results["data"].push_back(result);
+        }
+        return results;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("calculate_advised_wires: ") + exc.what()}};
+    }
+}
+
 void register_adviser_bindings(py::module& m) {
     m.def("calculate_advised_cores", &calculate_advised_cores,
         R"pbdoc(
@@ -386,6 +478,20 @@ void register_adviser_bindings(py::module& m) {
             Returns "Exception: No magnetics found in cache" if cache is empty.
         )pbdoc",
         py::arg("inputs_json"), py::arg("filter_flow_json"), py::arg("max_results"));
+
+    m.def("calculate_advised_sections", &calculate_advised_sections,
+        "Get advised coil sections.",
+        py::arg("mas"), py::arg("pattern"), py::arg("repetitions"));
+
+    m.def("calculate_advised_coil", &calculate_advised_coil,
+        "Get full coil design advice.",
+        py::arg("mas"));
+
+    m.def("calculate_advised_wires", &calculate_advised_wires,
+        "Get wire selection advice.",
+        py::arg("winding"), py::arg("section"), py::arg("current"),
+        py::arg("solid_insulation_requirements"), py::arg("temperature"), py::arg("number_sections"),
+        py::arg("max_results"), py::arg("use_planar_wires") = false);
 }
 
 } // namespace PyMKF

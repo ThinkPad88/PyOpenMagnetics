@@ -436,6 +436,45 @@ std::vector<std::string> get_available_wire_standards() {
     return wireStandards;
 }
 
+std::vector<std::string> get_planar_thicknesses() {
+    auto wires = OpenMagnetics::get_wires(WireType::PLANAR);
+    std::vector<std::string> uniqueNames;
+    for (auto& wire : wires) {
+        if (!wire.get_standard_name()) {
+            continue;
+        }
+        auto name = wire.get_standard_name().value();
+        if (std::find(uniqueNames.begin(), uniqueNames.end(), name) == uniqueNames.end()) {
+            uniqueNames.push_back(name);
+        }
+    }
+    return uniqueNames;
+}
+
+json get_planar_wire_by_standard_name(std::string standardName) {
+    try {
+        auto wires = OpenMagnetics::get_wires(WireType::PLANAR);
+        for (auto& wire : wires) {
+            if (!wire.get_standard_name()) {
+                continue;
+            }
+            if (wire.get_standard_name().value() == standardName) {
+                json result;
+                to_json(result, wire);
+                return result;
+            }
+        }
+        json result;
+        result["errorMessage"] = "Planar wire not found by standard name";
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
 void register_wire_bindings(py::module& m) {
     // Wires and materials
     m.def("get_wires", &get_wires,
@@ -846,10 +885,30 @@ void register_wire_bindings(py::module& m) {
     m.def("get_available_wire_standards", &get_available_wire_standards,
         R"pbdoc(
         Get list of available wire standards.
-        
+
         Returns:
             List of standard strings: "IEC 60317", "NEMA MW 1000", etc.
         )pbdoc");
+
+    m.def("get_planar_thicknesses", &get_planar_thicknesses,
+        R"pbdoc(
+        Get list of unique planar wire standard names (thicknesses).
+
+        Returns:
+            List of standard name strings for available planar wires.
+        )pbdoc");
+
+    m.def("get_planar_wire_by_standard_name", &get_planar_wire_by_standard_name,
+        R"pbdoc(
+        Find a planar wire by its standard name.
+
+        Args:
+            standard_name: Standard name designation.
+
+        Returns:
+            JSON Wire object or error message if not found.
+        )pbdoc",
+        py::arg("standard_name"));
 }
 
 } // namespace PyMKF

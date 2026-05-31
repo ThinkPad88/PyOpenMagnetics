@@ -1,5 +1,18 @@
 # AGENTS.md â€” PyOpenMagnetics AI Assistant Guide
 
+> **MKF is authoritative for all magnetics math.** Before implementing any
+> magnetics calculation or assuming an API exists, consult
+> [`../MKF/CAPABILITIES.md`](../MKF/CAPABILITIES.md). If a needed capability
+> isn't listed there, ask — don't reinvent it here.
+
+> **Two stub files in this repo:**
+> - `PyOpenMagnetics.pyi` — **curated**. Authoritative on arg conventions
+>   and gotchas. Read this first.
+> - `PyOpenMagnetics.generated.pyi` — **auto-generated** from the compiled
+>   `.so` via pybind11-stubgen. Wider coverage (every exported symbol) but
+>   raw — signatures are right, conventions may not be. Use as a discovery
+>   index; when it disagrees with the curated stub, trust the curated one.
+
 > **This file is the SINGLE SOURCE OF TRUTH for any AI agent using PyOpenMagnetics.**
 > Every instruction was derived from reading the C++ source code
 > (`converter.cpp`, `magnetics.cpp`, `cores.cpp`, `wires.cpp`, `settings.cpp`,
@@ -615,26 +628,74 @@ subcircuit = PyOM.export_magnetic_as_subcircuit(magnetic)
 
 ## 11. Supported Topologies
 
-| Topology string | Method A class | Singular/Plural | Notes |
-|---|---|---|---|
-| `"flyback"` | `Flyback` | PLURAL + **mode required** | Most common |
-| `"buck"` | `Buck` | **SINGULAR** | |
-| `"boost"` | `Boost` | **SINGULAR** | |
-| `"single_switch_forward"` | `SingleSwitchForward` | PLURAL | switchingFreq REQUIRED |
-| `"two_switch_forward"` | `TwoSwitchForward` | PLURAL | switchingFreq REQUIRED |
-| `"active_clamp_forward"` | `ActiveClampForward` | PLURAL | switchingFreq REQUIRED |
-| `"push_pull"` | `PushPull` | PLURAL | Same as Forward |
-| `"llc"` | `Llc` | PLURAL | |
-| `"isolated_buck"` | `IsolatedBuck` | PLURAL | |
-| `"isolated_buck_boost"` | `IsolatedBuckBoost` | PLURAL | |
-| Others (`"cllc"`, `"dab"`, `"psfb"`, `"pshb"`) | internal fallback | varies | |
+`process_converter("<topology>", json, use_ngspice)` is the universal entry
+point and accepts every string below, plus its `"advanced_<topology>"` form
+(the internal builds the `Advanced*` MKF class either way — "advanced" is
+selected by the JSON payload shape, e.g. presence of `desiredInductance` /
+`desiredMagnetizingInductance` / `desiredBoostInductance`, not by the name).
 
-Per-topology thin wrappers for `process_converter`:
+### 11.1 Per-topology API parity matrix
+
+Every topology exposes the **same four surfaces** (✓ = present). Columns:
+- **inputs** — `calculate_<t>_inputs(json)` (basic) and
+  `calculate_advanced_<t>_inputs(json)` (advanced)
+- **process** — dedicated `process_<t>(json)` thin wrapper (all are also
+  reachable via the generic `process_converter`)
+- **simulate** — `simulate_<t>_ideal_waveforms(json)` (ngspice)
+- **ngspice** — `generate_<t>_ngspice_circuit(json, input_voltage_index=0, operating_point_index=0)`
+
+| Topology string | inputs (basic / advanced) | process_* | simulate | generate ngspice |
+|---|---|---|---|---|
+| `flyback` | ✓ / ✓ | ✓ | ✓ (+`simulate_flyback_with_magnetic`) | ✓ |
+| `buck` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `boost` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `single_switch_forward` | ✓ / ✓ | ✓ | ✓ (`simulate_forward_*`) | ✓ (`generate_forward_*`) |
+| `two_switch_forward` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `active_clamp_forward` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `push_pull` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `isolated_buck` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `isolated_buck_boost` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `cuk` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `sepic` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `zeta` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `four_switch_buck_boost` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `weinberg` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `llc` | ✓ / ✓ | via `process_converter` | ✓ | ✓ |
+| `cllc` | ✓ / ✓ | via `process_converter` | ✓ | ✓ |
+| `clllc` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `src` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `dab` | ✓ / ✓ | via `process_converter` | ✓ | ✓ |
+| `phase_shifted_full_bridge` (`psfb`) | ✓ / ✓ | via `process_converter` | ✓ | ✓ |
+| `phase_shifted_half_bridge` (`pshb`) | ✓ / ✓ | via `process_converter` | ✓ | ✓ |
+| `asymmetric_half_bridge` (`ahb`) | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `vienna` | ✓ / ✓ | ✓ | ✓ | ✓ |
+| `power_factor_correction` (`pfc`) | ✓ / — ¹ | via `process_converter` | ✓ (`simulate_pfc_waveforms`) | ✓ ² |
+| `current_transformer` | — ³ | ✓ ³ | — | — |
+| `common_mode_choke` (`cmc`) | `calculate_cmc_inputs` / `calculate_advanced_cmc_inputs` | — | `simulate_cmc_ideal_waveforms`, `simulate_cmc_lisn_waveforms` | `generate_cmc_ngspice_circuit` |
+| `differential_mode_choke` (`dmc`) | `calculate_dmc_inputs` | `propose_dmc_design`, `verify_dmc_attenuation` | `simulate_dmc_waveforms` | `generate_dmc_ngspice_circuit` |
+
+¹ PFC has no `AdvancedPowerFactorCorrection` class in MKF — basic-only by design;
+  there is intentionally no `calculate_advanced_pfc_inputs`.
+² `generate_pfc_ngspice_circuit(json, dc_resistance=0.1, simulation_time=0.02,
+  time_step=1e-8)` — PFC is a line-frequency model, so it takes circuit-damping
+  parameters instead of the `input_voltage_index` / `operating_point_index`
+  sweep indices used by the DC-DC family. Inductance comes from an explicit
+  `"inductance"` field or is derived from `"mode"` (CCM/CrCM/DCM).
+³ Current transformer is measurement-only: `process_current_transformer(json,
+  turns_ratio, secondary_resistance=0.0)`.
+
+### 11.2 Dedicated `process_*` thin wrappers
+
 `process_flyback()`, `process_buck()`, `process_boost()`,
 `process_single_switch_forward()`, `process_two_switch_forward()`,
 `process_active_clamp_forward()`, `process_push_pull()`,
 `process_isolated_buck()`, `process_isolated_buck_boost()`,
-`process_current_transformer(json, turns_ratio, secondary_resistance=0.0)`
+`process_cuk()`, `process_sepic()`, `process_zeta()`,
+`process_four_switch_buck_boost()`, `process_asymmetric_half_bridge()`,
+`process_weinberg()`, `process_vienna()`, `process_clllc()`, `process_src()`,
+`process_current_transformer(json, turns_ratio, secondary_resistance=0.0)`.
+Topologies without a dedicated wrapper (`llc`, `cllc`, `dab`, `psfb`, `pshb`,
+`pfc`) are reached through `process_converter("<topology>", json)`.
 
 ---
 

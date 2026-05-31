@@ -28,6 +28,11 @@ double calculate_skin_ac_resistance_per_meter(json wireJson, json currentJson, d
 double calculate_effective_current_density(json wireJson, json currentJson, double temperature);
 double calculate_effective_skin_depth(std::string materialName, json currentJson, double temperature);
 
+// Additional loss functions
+json get_available_core_losses_methods(json magneticJson);
+json calculate_filling_factor(json coilJson);
+json calculate_ac_resistance_coefficients_per_winding(json magneticJson, double temperature, double frequency);
+
 void register_losses_bindings(py::module& m);
 
 } // namespace PyMKF

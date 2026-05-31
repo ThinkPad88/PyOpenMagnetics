@@ -188,6 +188,161 @@ std::vector<double> python_list_to_vector(py::list pythonList) {
     return result;
 }
 
+json standardize_signal_descriptor(json signalDescriptorJson, double frequency) {
+    try {
+        SignalDescriptor signalDescriptor(signalDescriptorJson);
+        signalDescriptor = OpenMagnetics::Inputs::standardize_waveform(signalDescriptor, frequency);
+        auto sampledWaveform = OpenMagnetics::Inputs::calculate_sampled_waveform(signalDescriptor.get_waveform().value(), frequency);
+        signalDescriptor.set_harmonics(OpenMagnetics::Inputs::calculate_harmonics_data(sampledWaveform, frequency));
+        signalDescriptor.set_processed(OpenMagnetics::Inputs::calculate_processed_data(signalDescriptor, sampledWaveform, true));
+        json result;
+        to_json(result, signalDescriptor);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json create_waveform(json processedJson, double frequency) {
+    try {
+        Processed processed(processedJson);
+        auto waveform = OpenMagnetics::Inputs::create_waveform(processed, frequency);
+        json result;
+        to_json(result, waveform);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json calculate_processed(json harmonicsJson, json waveformJson) {
+    try {
+        Harmonics harmonics(harmonicsJson);
+        Waveform waveform(waveformJson);
+        auto processed = OpenMagnetics::Inputs::calculate_processed_data(harmonics, waveform, true);
+        json result;
+        to_json(result, processed);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json scale_waveform_time_to_frequency(json waveformJson, double newFrequency) {
+    try {
+        Waveform waveform(waveformJson);
+        auto scaled = OpenMagnetics::Inputs::scale_time_to_frequency(waveform, newFrequency);
+        json result;
+        to_json(result, scaled);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json scale_excitation_time_to_frequency(json excitationJson, double newFrequency) {
+    try {
+        OperatingPointExcitation excitation(excitationJson);
+        OpenMagnetics::Inputs::scale_time_to_frequency(excitation, newFrequency, false, true);
+        json result;
+        to_json(result, excitation);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json calculate_induced_voltage(json excitationJson, double magnetizingInductance) {
+    try {
+        OperatingPointExcitation excitation(excitationJson);
+        auto voltage = OpenMagnetics::Inputs::calculate_induced_voltage(excitation, magnetizingInductance);
+        json result;
+        to_json(result, voltage);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json calculate_induced_current(json excitationJson, double magnetizingInductance) {
+    try {
+        OperatingPointExcitation excitation(excitationJson);
+        auto current = OpenMagnetics::Inputs::calculate_magnetizing_current(excitation, magnetizingInductance, true, 0.0);
+
+        if (excitation.get_voltage() && excitation.get_voltage()->get_processed() && excitation.get_voltage()->get_processed()->get_duty_cycle()) {
+            auto processed = current.get_processed().value();
+            processed.set_duty_cycle(excitation.get_voltage()->get_processed()->get_duty_cycle().value());
+            current.set_processed(processed);
+        }
+
+        json result;
+        to_json(result, current);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+bool check_requirement(json requirementJson, double value) {
+    DimensionWithTolerance requirement(requirementJson);
+    return OpenMagnetics::check_requirement(requirement, value);
+}
+
+json get_main_harmonic_indexes(json harmonicsJson, double threshold, int mainHarmonicIndex) {
+    try {
+        Harmonics harmonics(harmonicsJson);
+        auto indexes = OpenMagnetics::get_main_harmonic_indexes(harmonics, threshold, static_cast<size_t>(mainHarmonicIndex));
+        json result = json::array();
+        for (auto idx : indexes) {
+            result.push_back(idx);
+        }
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json get_excitation_harmonic_indexes(json excitationJson, double threshold) {
+    try {
+        OperatingPointExcitation excitation(excitationJson);
+        auto indexes = OpenMagnetics::get_main_harmonic_indexes(excitation, threshold);
+        json result = json::array();
+        for (auto idx : indexes) {
+            result.push_back(idx);
+        }
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
 void register_utils_bindings(py::module& m) {
     m.def("resolve_dimension_with_tolerance", &resolve_dimension_with_tolerance,
         R"pbdoc(
@@ -308,17 +463,148 @@ void register_utils_bindings(py::module& m) {
     m.def("calculate_reflected_primary", &calculate_reflected_primary,
         R"pbdoc(
         Calculate reflected primary winding excitation.
-        
+
         Transforms secondary winding excitation to primary side
         using the turns ratio.
-        
+
         Args:
             secondary_excitation_json: JSON object with secondary excitation.
             turn_ratio: Primary to secondary turns ratio.
-        
+
         Returns:
             JSON object with primary excitation.
         )pbdoc");
+
+    m.def("standardize_signal_descriptor", &standardize_signal_descriptor,
+        R"pbdoc(
+        Standardize a signal descriptor by computing waveform, harmonics, and processed data.
+
+        Args:
+            signal_descriptor_json: JSON SignalDescriptor object.
+            frequency: Operating frequency in Hz.
+
+        Returns:
+            JSON SignalDescriptor with all fields populated.
+        )pbdoc",
+        py::arg("signalDescriptorJson"), py::arg("frequency"));
+
+    m.def("create_waveform", &create_waveform,
+        R"pbdoc(
+        Create a waveform from processed data.
+
+        Args:
+            processed_json: JSON Processed object with waveform parameters.
+            frequency: Operating frequency in Hz.
+
+        Returns:
+            JSON Waveform object.
+        )pbdoc",
+        py::arg("processedJson"), py::arg("frequency"));
+
+    m.def("calculate_processed", &calculate_processed,
+        R"pbdoc(
+        Calculate processed data from harmonics and waveform.
+
+        Args:
+            harmonics_json: JSON Harmonics object.
+            waveform_json: JSON Waveform object.
+
+        Returns:
+            JSON Processed object with RMS, peak, offset, etc.
+        )pbdoc",
+        py::arg("harmonicsJson"), py::arg("waveformJson"));
+
+    m.def("scale_waveform_time_to_frequency", &scale_waveform_time_to_frequency,
+        R"pbdoc(
+        Scale waveform time axis to a new frequency.
+
+        Args:
+            waveform_json: JSON Waveform object.
+            new_frequency: Target frequency in Hz.
+
+        Returns:
+            JSON Waveform with rescaled time axis.
+        )pbdoc",
+        py::arg("waveformJson"), py::arg("newFrequency"));
+
+    m.def("scale_excitation_time_to_frequency", &scale_excitation_time_to_frequency,
+        R"pbdoc(
+        Scale excitation time axis to a new frequency.
+
+        Args:
+            excitation_json: JSON OperatingPointExcitation object.
+            new_frequency: Target frequency in Hz.
+
+        Returns:
+            JSON OperatingPointExcitation with rescaled time axis.
+        )pbdoc",
+        py::arg("excitationJson"), py::arg("newFrequency"));
+
+    m.def("calculate_induced_voltage", &calculate_induced_voltage,
+        R"pbdoc(
+        Calculate induced voltage from current excitation and magnetizing inductance.
+
+        Args:
+            excitation_json: JSON OperatingPointExcitation with current data.
+            magnetizing_inductance: Magnetizing inductance in Henries.
+
+        Returns:
+            JSON SignalDescriptor with induced voltage waveform.
+        )pbdoc",
+        py::arg("excitationJson"), py::arg("magnetizingInductance"));
+
+    m.def("calculate_induced_current", &calculate_induced_current,
+        R"pbdoc(
+        Calculate induced (magnetizing) current from voltage excitation and inductance.
+
+        Args:
+            excitation_json: JSON OperatingPointExcitation with voltage data.
+            magnetizing_inductance: Magnetizing inductance in Henries.
+
+        Returns:
+            JSON SignalDescriptor with induced current waveform.
+        )pbdoc",
+        py::arg("excitationJson"), py::arg("magnetizingInductance"));
+
+    m.def("check_requirement", &check_requirement,
+        R"pbdoc(
+        Check if a value satisfies a dimensional requirement with tolerance.
+
+        Args:
+            requirement_json: JSON DimensionWithTolerance object.
+            value: Value to check against the requirement.
+
+        Returns:
+            True if the value satisfies the requirement, False otherwise.
+        )pbdoc",
+        py::arg("requirementJson"), py::arg("value"));
+
+    m.def("get_main_harmonic_indexes", &get_main_harmonic_indexes,
+        R"pbdoc(
+        Get indexes of the main harmonics above a threshold.
+
+        Args:
+            harmonics_json: JSON Harmonics object.
+            threshold: Amplitude threshold for inclusion.
+            main_harmonic_index: Index of the fundamental harmonic.
+
+        Returns:
+            JSON array of harmonic indexes.
+        )pbdoc",
+        py::arg("harmonicsJson"), py::arg("threshold"), py::arg("mainHarmonicIndex"));
+
+    m.def("get_excitation_harmonic_indexes", &get_excitation_harmonic_indexes,
+        R"pbdoc(
+        Get indexes of significant harmonics in an excitation.
+
+        Args:
+            excitation_json: JSON OperatingPointExcitation object.
+            threshold: Amplitude threshold for inclusion.
+
+        Returns:
+            JSON array of harmonic indexes.
+        )pbdoc",
+        py::arg("excitationJson"), py::arg("threshold"));
 }
 
 } // namespace PyMKF

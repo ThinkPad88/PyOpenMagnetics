@@ -592,6 +592,60 @@ json get_isolation_side_from_index(size_t index) {
     return OpenMagnetics::get_isolation_side_from_index(index);
 }
 
+json set_interlayer_insulation(json coilJson, double layerThickness) {
+    try {
+        OpenMagnetics::Coil coil(coilJson, false);
+        coil.set_interlayer_insulation(layerThickness);
+
+        json result;
+        to_json(result, coil);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+json set_intersection_insulation(json coilJson, double layerThickness, int numberInsulationLayers) {
+    try {
+        OpenMagnetics::Coil coil(coilJson, false);
+        coil.set_intersection_insulation(layerThickness, numberInsulationLayers);
+
+        json result;
+        to_json(result, coil);
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+json get_solid_insulation_requirements_for_wires(json inputsJson, json patternJson, int repetitions) {
+    try {
+        OpenMagnetics::Inputs inputs(inputsJson, false);
+        std::vector<size_t> pattern = patternJson;
+
+        auto results = OpenMagnetics::InsulationCoordinator::get_solid_insulation_requirements_for_wires(inputs, pattern, repetitions);
+
+        json result = json::array();
+        for (auto& row : results) {
+            json rowJson = json::array();
+            for (auto& elem : row) {
+                json aux;
+                to_json(aux, elem);
+                rowJson.push_back(aux);
+            }
+            result.push_back(rowJson);
+        }
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
 void register_winding_bindings(py::module& m) {
     // Winding functions
     m.def("wind", &wind,
@@ -892,16 +946,57 @@ void register_winding_bindings(py::module& m) {
     m.def("get_isolation_side_from_index", &get_isolation_side_from_index,
         R"pbdoc(
         Get isolation side designation from winding index.
-        
+
         Used for insulation coordination between primary and secondary sides.
-        
+
         Args:
             index: Winding index (0 = primary, 1+ = secondaries).
-        
+
         Returns:
             JSON IsolationSide string ("Primary", "Secondary", etc.).
         )pbdoc",
         py::arg("index"));
+
+    m.def("set_interlayer_insulation", &set_interlayer_insulation,
+        R"pbdoc(
+        Set interlayer insulation for a coil.
+
+        Args:
+            coil_json: JSON Coil specification.
+            layer_thickness: Insulation layer thickness in meters.
+
+        Returns:
+            Updated JSON Coil with interlayer insulation applied.
+        )pbdoc",
+        py::arg("coil_json"), py::arg("layer_thickness"));
+
+    m.def("set_intersection_insulation", &set_intersection_insulation,
+        R"pbdoc(
+        Set intersection insulation for a coil.
+
+        Args:
+            coil_json: JSON Coil specification.
+            layer_thickness: Insulation layer thickness in meters.
+            number_insulation_layers: Number of insulation layers.
+
+        Returns:
+            Updated JSON Coil with intersection insulation applied.
+        )pbdoc",
+        py::arg("coil_json"), py::arg("layer_thickness"), py::arg("number_insulation_layers"));
+
+    m.def("get_solid_insulation_requirements_for_wires", &get_solid_insulation_requirements_for_wires,
+        R"pbdoc(
+        Get solid insulation requirements for wires based on safety standards.
+
+        Args:
+            inputs_json: JSON Inputs with insulation requirements.
+            pattern_json: Winding pattern array.
+            repetitions: Number of pattern repetitions.
+
+        Returns:
+            JSON array of solid insulation requirements for each wire pair.
+        )pbdoc",
+        py::arg("inputs_json"), py::arg("pattern_json"), py::arg("repetitions"));
 }
 
 } // namespace PyMKF

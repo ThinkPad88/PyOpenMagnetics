@@ -297,6 +297,29 @@ magnetics = get_advised_magnetics(inputs, max_results=5)
 |----------|-------------|
 | `export_magnetic_as_subcircuit(magnetic, ...)` | Export as SPICE model |
 
+### Converter Topologies
+
+All 24 power topologies are exposed with a uniform API. Use the generic
+`process_converter("<topology>", converter, use_ngspice)` (also accepts
+`"advanced_<topology>"`), or the per-topology functions below.
+
+| Function family | Description |
+|----------|-------------|
+| `process_converter(name, json, use_ngspice=True)` | Universal dispatch for every topology |
+| `design_magnetics_from_converter(name, json, max_results, core_mode, ...)` | Converter → advised magnetic designs (single call) |
+| `calculate_<t>_inputs(json)` | Build MAS inputs (basic mode) for topology `<t>` |
+| `calculate_advanced_<t>_inputs(json)` | Build MAS inputs (advanced mode) |
+| `simulate_<t>_ideal_waveforms(json)` | ngspice ideal-waveform simulation |
+| `generate_<t>_ngspice_circuit(json, input_voltage_index=0, operating_point_index=0)` | Generate ngspice netlist |
+
+`<t>` ∈ `flyback, buck, boost, single_switch_forward, two_switch_forward,
+active_clamp_forward, push_pull, isolated_buck, isolated_buck_boost, cuk,
+sepic, zeta, four_switch_buck_boost, weinberg, llc, cllc, clllc, src, dab,
+psfb, pshb, ahb, vienna`. PFC is basic-only (`calculate_pfc_inputs`,
+`generate_pfc_ngspice_circuit(json, dc_resistance=0.1, simulation_time=0.02,
+time_step=1e-8)`); common-/differential-mode chokes use the `cmc` / `dmc`
+families. See `AGENTS.md` §11 for the full per-topology parity matrix.
+
 ## Core Materials
 
 PyOpenMagnetics includes materials from major manufacturers:

@@ -46,6 +46,10 @@ std::vector<std::string> get_unique_wire_diameters(json wireStandardJson);
 std::vector<std::string> get_available_wire_types();
 std::vector<std::string> get_available_wire_standards();
 
+// Planar wire functions
+std::vector<std::string> get_planar_thicknesses();
+json get_planar_wire_by_standard_name(std::string standardName);
+
 void register_wire_bindings(py::module& m);
 
 } // namespace PyMKF

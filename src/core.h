@@ -46,6 +46,16 @@ double calculate_inductance_from_number_turns_and_gapping(json coreData, json co
 double calculate_number_turns_from_gapping_and_inductance(json coreData, json inputsData, json modelsData);
 json calculate_gapping_from_number_turns_and_inductance(json coreData, json coilData, json inputsData, std::string gappingTypeJson, int decimals, json modelsData);
 
+// Shape queries by family/manufacturer
+json get_available_core_shapes_by_family(std::string familyString);
+json get_available_core_shapes_by_manufacturer(std::string manufacturer);
+json get_shape_family_dimensions(std::string familyString, std::string familySubtype);
+json get_shape_family_subtypes(std::string familyString);
+std::vector<std::string> get_available_core_filters();
+std::vector<double> get_maximum_dimensions(json magneticJson);
+json calculate_core_data_from_shape(json shapeJson);
+json calculate_complex_permeability(json materialJson, double frequency);
+
 void register_core_bindings(py::module& m);
 
 } // namespace PyMKF

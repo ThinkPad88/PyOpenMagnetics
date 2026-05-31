@@ -1,4 +1,5 @@
 #include "database.h"
+#include <sstream>
 
 namespace PyMKF {
 
@@ -204,6 +205,53 @@ std::string clear_magnetic_cache() {
     }
 }
 
+json load_cores(json fileToLoadJson, bool includeToroids, bool useOnlyCoresInStock) {
+    try {
+        OpenMagnetics::settings.set_use_toroidal_cores(includeToroids);
+        OpenMagnetics::settings.set_use_only_cores_in_stock(useOnlyCoresInStock);
+
+        if (!fileToLoadJson.is_null() && fileToLoadJson.is_string()) {
+            std::string fileToLoad = fileToLoadJson;
+            OpenMagnetics::load_cores(fileToLoad);
+        }
+        else {
+            OpenMagnetics::load_cores();
+        }
+
+        json result;
+        result["count"] = OpenMagnetics::coreDatabase.size();
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+void clear_loaded_cores() {
+    OpenMagnetics::clear_loaded_cores();
+}
+
+std::string load_magnetics_from_string(std::string jsonText) {
+    try {
+        std::istringstream in(jsonText);
+        std::string line;
+        while (getline(in, line)) {
+            if (line.empty()) continue;
+            json jf = json::parse(line);
+            OpenMagnetics::Magnetic magnetic(jf);
+            magnetic = OpenMagnetics::magnetic_autocomplete(magnetic);
+            std::string key = magnetic.get_manufacturer_info()->get_reference().value();
+            OpenMagnetics::magneticsCache.load(key, magnetic);
+        }
+        return std::to_string(OpenMagnetics::magneticsCache.size());
+    }
+    catch (const std::exception &exc) {
+        return std::string{exc.what()};
+    }
+}
+
 void register_database_bindings(py::module& m) {
     m.def("load_databases", &load_databases, "Load all databases from JSON");
     m.def("read_databases", &read_databases, "Read databases from file path");
@@ -220,6 +268,38 @@ void register_database_bindings(py::module& m) {
     m.def("is_wire_database_empty", &is_wire_database_empty, "Check if wire database is empty");
     m.def("load_magnetics_from_file", &load_magnetics_from_file, "Load magnetic components from file");
     m.def("clear_magnetic_cache", &clear_magnetic_cache, "Clear cached magnetic calculations");
+
+    m.def("load_cores", &load_cores,
+        R"pbdoc(
+        Load cores from file or defaults.
+
+        Args:
+            file_to_load_json: JSON string with file path, or null for defaults.
+            include_toroids: Whether to include toroidal cores.
+            use_only_cores_in_stock: Whether to limit to in-stock cores.
+
+        Returns:
+            JSON object with count of loaded cores.
+        )pbdoc",
+        py::arg("file_to_load_json"), py::arg("include_toroids"), py::arg("use_only_cores_in_stock"));
+
+    m.def("clear_loaded_cores", &clear_loaded_cores,
+        R"pbdoc(
+        Clear all loaded cores from the database.
+        )pbdoc");
+
+    m.def("load_magnetics_from_string", &load_magnetics_from_string,
+        R"pbdoc(
+        Load magnetic components from NDJSON text.
+
+        Args:
+            json_text: NDJSON string with one magnetic per line.
+
+        Returns:
+            String with count of loaded magnetics.
+        )pbdoc",
+        py::arg("json_text"));
+
 }
 
 } // namespace PyMKF

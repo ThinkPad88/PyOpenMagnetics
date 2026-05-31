@@ -22,6 +22,11 @@ bool is_wire_database_empty();
 std::string load_magnetics_from_file(std::string path, bool expand);
 std::string clear_magnetic_cache();
 
+// Additional database functions
+json load_cores(json fileToLoadJson, bool includeToroids, bool useOnlyCoresInStock);
+void clear_loaded_cores();
+std::string load_magnetics_from_string(std::string jsonText);
+
 void register_database_bindings(py::module& m);
 
 } // namespace PyMKF

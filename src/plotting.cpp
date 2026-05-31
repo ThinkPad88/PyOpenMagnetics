@@ -187,6 +187,166 @@ json plot_bobbin(json magneticJson, std::string outputPath) {
     }
 }
 
+json plot_sections(json magneticJson, std::string outputPath) {
+    try {
+        OpenMagnetics::Magnetic magnetic(magneticJson);
+
+        std::filesystem::path filePath = outputPath.empty()
+            ? std::filesystem::temp_directory_path() / "pyom_plot_sections.svg"
+            : std::filesystem::path(outputPath);
+
+        OpenMagnetics::Painter painter(filePath);
+        painter.paint_core(magnetic);
+        painter.paint_bobbin(magnetic);
+        painter.paint_coil_sections(magnetic);
+
+        std::string svgContent = painter.export_svg();
+
+        json result;
+        result["success"] = true;
+        result["svg"] = svgContent;
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["success"] = false;
+        exception["error"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json plot_layers(json magneticJson, std::string outputPath) {
+    try {
+        OpenMagnetics::Magnetic magnetic(magneticJson);
+
+        std::filesystem::path filePath = outputPath.empty()
+            ? std::filesystem::temp_directory_path() / "pyom_plot_layers.svg"
+            : std::filesystem::path(outputPath);
+
+        OpenMagnetics::Painter painter(filePath);
+        painter.paint_core(magnetic);
+        painter.paint_bobbin(magnetic);
+        painter.paint_coil_layers(magnetic);
+
+        std::string svgContent = painter.export_svg();
+
+        json result;
+        result["success"] = true;
+        result["svg"] = svgContent;
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["success"] = false;
+        exception["error"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json plot_turns(json magneticJson, std::string outputPath) {
+    try {
+        OpenMagnetics::Magnetic magnetic(magneticJson);
+
+        OpenMagnetics::settings.set_painter_simple_litz(true);
+        OpenMagnetics::settings.set_painter_advanced_litz(false);
+
+        if (!magnetic.get_coil().get_turns_description()) {
+            magnetic.get_mutable_coil().wind();
+        }
+
+        std::filesystem::path filePath = outputPath.empty()
+            ? std::filesystem::temp_directory_path() / "pyom_plot_turns.svg"
+            : std::filesystem::path(outputPath);
+
+        OpenMagnetics::Painter painter(filePath);
+        painter.paint_core(magnetic);
+        painter.paint_bobbin(magnetic);
+        painter.paint_coil_turns(magnetic);
+
+        std::string svgContent = painter.export_svg();
+
+        json result;
+        result["success"] = true;
+        result["svg"] = svgContent;
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["success"] = false;
+        exception["error"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json plot_wire_losses(json magneticJson, json operatingPointJson, std::string outputPath) {
+    try {
+        OpenMagnetics::Magnetic magnetic(magneticJson);
+        OperatingPoint operatingPoint(operatingPointJson);
+
+        OpenMagnetics::settings.set_painter_simple_litz(true);
+        OpenMagnetics::settings.set_painter_advanced_litz(false);
+
+        if (!magnetic.get_coil().get_turns_description()) {
+            magnetic.get_mutable_coil().wind();
+        }
+
+        std::filesystem::path filePath = outputPath.empty()
+            ? std::filesystem::temp_directory_path() / "pyom_plot_wire_losses.svg"
+            : std::filesystem::path(outputPath);
+
+        OpenMagnetics::Painter painter(filePath);
+        painter.paint_core(magnetic);
+        painter.paint_bobbin(magnetic);
+        painter.paint_coil_turns(magnetic);
+        painter.paint_wire_losses(magnetic, std::nullopt, operatingPoint);
+
+        std::string svgContent = painter.export_svg();
+
+        json result;
+        result["success"] = true;
+        result["svg"] = svgContent;
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["success"] = false;
+        exception["error"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json plot_temperature_field(json magneticJson, json operatingPointJson, std::string textColor, std::string bgColor, std::string outputPath) {
+    try {
+        OpenMagnetics::Magnetic magnetic(magneticJson);
+        OperatingPoint operatingPoint(operatingPointJson);
+
+        OpenMagnetics::Temperature temperatureModel(magnetic);
+        auto thermalResult = temperatureModel.calculateTemperatures();
+
+        std::filesystem::path filePath = outputPath.empty()
+            ? std::filesystem::temp_directory_path() / "pyom_plot_temperature_field.svg"
+            : std::filesystem::path(outputPath);
+
+        double ambientTemp = operatingPoint.get_conditions().get_ambient_temperature();
+        OpenMagnetics::Painter painter(filePath);
+        painter.paint_temperature_field(magnetic, thermalResult.nodeTemperatures, true,
+            OpenMagnetics::ColorPalette::BLUE_TO_RED, ambientTemp, textColor, bgColor);
+
+        std::string svgContent = painter.export_svg();
+
+        json result;
+        result["success"] = true;
+        result["svg"] = svgContent;
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["success"] = false;
+        exception["error"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
 void register_plotting_bindings(py::module& m) {
     m.def("plot_core", &plot_core,
         R"pbdoc(
@@ -284,11 +444,11 @@ void register_plotting_bindings(py::module& m) {
     m.def("plot_bobbin", &plot_bobbin,
         R"pbdoc(
         Generate a visualization of a bobbin with its core as SVG.
-        
+
         Args:
             magneticJson: JSON object with complete magnetic specification.
             outputPath: Optional file path to save SVG. If empty, uses temp directory.
-        
+
         Returns:
             JSON object with:
             - success: Boolean indicating operation success
@@ -296,6 +456,88 @@ void register_plotting_bindings(py::module& m) {
             - error: Error message if success is false
         )pbdoc",
         py::arg("magneticJson"), py::arg("outputPath") = "");
+
+    m.def("plot_sections", &plot_sections,
+        R"pbdoc(
+        Generate a visualization of coil sections as SVG.
+
+        Shows core, bobbin, and coil section boundaries.
+
+        Args:
+            magneticJson: JSON object with complete magnetic specification.
+            outputPath: Optional file path to save SVG. If empty, uses temp directory.
+
+        Returns:
+            JSON object with success and svg fields.
+        )pbdoc",
+        py::arg("magneticJson"), py::arg("outputPath") = "");
+
+    m.def("plot_layers", &plot_layers,
+        R"pbdoc(
+        Generate a visualization of coil layers as SVG.
+
+        Shows core, bobbin, and coil layer arrangement.
+
+        Args:
+            magneticJson: JSON object with complete magnetic specification.
+            outputPath: Optional file path to save SVG. If empty, uses temp directory.
+
+        Returns:
+            JSON object with success and svg fields.
+        )pbdoc",
+        py::arg("magneticJson"), py::arg("outputPath") = "");
+
+    m.def("plot_turns", &plot_turns,
+        R"pbdoc(
+        Generate a visualization of coil turns as SVG.
+
+        Shows core, bobbin, and individual turn positions. Winds the coil
+        automatically if turns description is not present.
+
+        Args:
+            magneticJson: JSON object with complete magnetic specification.
+            outputPath: Optional file path to save SVG. If empty, uses temp directory.
+
+        Returns:
+            JSON object with success and svg fields.
+        )pbdoc",
+        py::arg("magneticJson"), py::arg("outputPath") = "");
+
+    m.def("plot_wire_losses", &plot_wire_losses,
+        R"pbdoc(
+        Generate a visualization of wire losses as SVG.
+
+        Shows core, bobbin, turns, and wire loss distribution.
+
+        Args:
+            magneticJson: JSON object with complete magnetic specification.
+            operatingPointJson: Operating conditions including excitation currents.
+            outputPath: Optional file path to save SVG. If empty, uses temp directory.
+
+        Returns:
+            JSON object with success and svg fields.
+        )pbdoc",
+        py::arg("magneticJson"), py::arg("operatingPointJson"), py::arg("outputPath") = "");
+
+    m.def("plot_temperature_field", &plot_temperature_field,
+        R"pbdoc(
+        Generate a visualization of the temperature field as SVG.
+
+        Runs magnetic simulation to compute losses, then calculates temperature
+        distribution and paints it.
+
+        Args:
+            magneticJson: JSON object with complete magnetic specification.
+            operatingPointJson: Operating conditions.
+            textColor: Color string for text elements.
+            bgColor: Color string for background.
+            outputPath: Optional file path to save SVG. If empty, uses temp directory.
+
+        Returns:
+            JSON object with success and svg fields.
+        )pbdoc",
+        py::arg("magneticJson"), py::arg("operatingPointJson"),
+        py::arg("textColor"), py::arg("bgColor"), py::arg("outputPath") = "");
 }
 
 } // namespace PyMKF} // namespace PyMKF

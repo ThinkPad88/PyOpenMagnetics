@@ -24,16 +24,15 @@ else ()
     set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -Wall -Wextra -Wno-deprecated-declarations -Wno-unused-parameter -Wno-switch")
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-    # set(CMAKE_BUILD_TYPE RelWithDebInfo)
     # set(CMAKE_BUILD_TYPE MinSizeRel)
-    set(CMAKE_BUILD_TYPE Release)
-    
+    # set(CMAKE_BUILD_TYPE Release)
+    set(CMAKE_BUILD_TYPE RelWithDebInfo)
+
     # Enable Link Time Optimization to reduce binary size
     set(CMAKE_INTERPROCEDURAL_OPTIMIZATION FALSE)  # TEMP: disable LTO (OOM)
-    
-    # Strip symbols and use size optimization
-    set(CMAKE_CXX_FLAGS_RELEASE "${CMAKE_CXX_FLAGS_RELEASE} -s -Os")
-    set(CMAKE_SHARED_LINKER_FLAGS_RELEASE "${CMAKE_SHARED_LINKER_FLAGS_RELEASE} -Wl,--strip-all")
+
+    # Debug build: keep symbols and frame pointers for gdb backtraces.
+    set(CMAKE_CXX_FLAGS_RELWITHDEBINFO "${CMAKE_CXX_FLAGS_RELWITHDEBINFO} -O1 -g -fno-omit-frame-pointer")
 endif()
 
 SET(MAS_DIRECTORY "${CMAKE_BINARY_DIR}/MAS/")

@@ -32,6 +32,7 @@
 
 #include <set>
 #include <unordered_map>
+#include <cmath>
 
 namespace PyMKF {
 
@@ -711,10 +712,12 @@ OpenMagnetics::Inputs dispatch_converter(const std::string& topologyName, const 
     else if (topologyName == "dab" || topologyName == "advanced_dab") {
         return process_dab_internal(converterJson, useNgspice);
     }
-    else if (topologyName == "phase_shifted_full_bridge" || topologyName == "psfb") {
+    else if (topologyName == "phase_shifted_full_bridge" || topologyName == "psfb" ||
+             topologyName == "advanced_phase_shifted_full_bridge" || topologyName == "advanced_psfb") {
         return process_psfb_internal(converterJson, useNgspice);
     }
-    else if (topologyName == "phase_shifted_half_bridge" || topologyName == "pshb") {
+    else if (topologyName == "phase_shifted_half_bridge" || topologyName == "pshb" ||
+             topologyName == "advanced_phase_shifted_half_bridge" || topologyName == "advanced_pshb") {
         return process_pshb_internal(converterJson, useNgspice);
     }
     else if (topologyName == "isolated_buck") {
@@ -1534,14 +1537,23 @@ DEFINE_CONVERTER_ALIAS(calculate_advanced_weinberg_inputs, "advanced_weinberg")
 DEFINE_CONVERTER_ALIAS(calculate_clllc_inputs, "clllc")
 DEFINE_CONVERTER_ALIAS(calculate_advanced_clllc_inputs, "advanced_clllc")
 DEFINE_CONVERTER_ALIAS(calculate_vienna_inputs, "vienna")
+DEFINE_CONVERTER_ALIAS(calculate_advanced_vienna_inputs, "advanced_vienna")
 DEFINE_CONVERTER_ALIAS(calculate_src_inputs, "src")
+DEFINE_CONVERTER_ALIAS(calculate_advanced_src_inputs, "advanced_src")
 DEFINE_CONVERTER_ALIAS(calculate_llc_inputs, "llc")
+DEFINE_CONVERTER_ALIAS(calculate_advanced_llc_inputs, "advanced_llc")
 DEFINE_CONVERTER_ALIAS(calculate_cllc_inputs, "cllc")
+DEFINE_CONVERTER_ALIAS(calculate_advanced_cllc_inputs, "advanced_cllc")
 DEFINE_CONVERTER_ALIAS(calculate_dab_inputs, "dab")
+DEFINE_CONVERTER_ALIAS(calculate_advanced_dab_inputs, "advanced_dab")
+// PFC has no AdvancedPowerFactorCorrection class in MKF — basic-only by design.
 DEFINE_CONVERTER_ALIAS(calculate_pfc_inputs, "power_factor_correction")
 DEFINE_CONVERTER_ALIAS(calculate_psfb_inputs, "phase_shifted_full_bridge")
+DEFINE_CONVERTER_ALIAS(calculate_advanced_psfb_inputs, "advanced_phase_shifted_full_bridge")
 DEFINE_CONVERTER_ALIAS(calculate_pshb_inputs, "phase_shifted_half_bridge")
+DEFINE_CONVERTER_ALIAS(calculate_advanced_pshb_inputs, "advanced_phase_shifted_half_bridge")
 DEFINE_CONVERTER_ALIAS(calculate_ahb_inputs, "asymmetric_half_bridge")
+DEFINE_CONVERTER_ALIAS(calculate_advanced_ahb_inputs, "advanced_asymmetric_half_bridge")
 
 #undef DEFINE_CONVERTER_ALIAS
 
@@ -1848,6 +1860,2057 @@ std::string generate_dmc_ngspice_circuit(json dmcInputsJson) {
     }
 }
 
+// ============================================================================
+// Phase B simulate_*_ideal_waveforms functions (parity port from WebLibMKF).
+//
+// Each function runs ngspice simulation to produce per-period waveforms and
+// operating points, plus topology-specific diagnostics. Adapted for PyMKF:
+//   - json in / json out (not std::string)
+//   - json{{"error", ...}} for errors (not "Exception: ")
+//   - No json::parse() / .dump(4)
+//   - No WASM timing debug prints
+// ============================================================================
+
+// ------ Flyback (isolated, transformer-based) ------
+json simulate_flyback_ideal_waveforms(json inputsJson) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+
+        OpenMagnetics::DesignRequirements designRequirements;
+        std::vector<double> turnsRatios;
+        double magnetizingInductance;
+
+        std::unique_ptr<OpenMagnetics::Flyback> flybackPtr;
+
+        if (isAdvanced) {
+            auto advPtr = std::make_unique<OpenMagnetics::AdvancedFlyback>(inputsJson);
+            magnetizingInductance = advPtr->get_desired_inductance();
+            turnsRatios = advPtr->get_desired_turns_ratios();
+
+            designRequirements.get_mutable_turns_ratios().clear();
+            for (auto tr : turnsRatios) {
+                OpenMagnetics::DimensionWithTolerance trTol;
+                trTol.set_nominal(tr);
+                designRequirements.get_mutable_turns_ratios().push_back(trTol);
+            }
+            OpenMagnetics::DimensionWithTolerance inductanceTol;
+            inductanceTol.set_nominal(magnetizingInductance);
+            designRequirements.set_magnetizing_inductance(inductanceTol);
+            std::vector<OpenMagnetics::IsolationSide> isolationSides;
+            for (size_t w = 0; w < turnsRatios.size() + 1; ++w) {
+                isolationSides.push_back(OpenMagnetics::get_isolation_side_from_index(w));
+            }
+            designRequirements.set_isolation_sides(isolationSides);
+            designRequirements.set_topology(MAS::Topologies::FLYBACK_CONVERTER);
+
+            flybackPtr = std::move(advPtr);
+        } else {
+            flybackPtr = std::make_unique<OpenMagnetics::Flyback>(inputsJson);
+            designRequirements = flybackPtr->process_design_requirements();
+            for (const auto& tr : designRequirements.get_turns_ratios()) {
+                turnsRatios.push_back(tr.get_nominal().value());
+            }
+            magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(magnetizingInductance > 0)) {
+                throw std::runtime_error("Unable to calculate magnetizing inductance");
+            }
+        }
+
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) {
+            throw std::runtime_error("ngspice simulation is required but ngspice is not available");
+        }
+
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5);
+        flybackPtr->set_num_periods_to_extract(numberOfPeriods);
+        flybackPtr->set_num_steady_state_periods(numberOfSteadyStatePeriods);
+
+        auto topologyWaveforms = flybackPtr->simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance, numberOfPeriods);
+        auto operatingPoints = flybackPtr->simulate_and_extract_operating_points(turnsRatios, magnetizingInductance, numberOfPeriods);
+
+        json result;
+        json inputs;
+        inputs["designRequirements"] = json();
+        to_json(inputs["designRequirements"], designRequirements);
+        inputs["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); }
+        result["inputs"] = inputs;
+
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+
+        flybackPtr->process_operating_points(turnsRatios, magnetizingInductance);
+        {
+            json diag;
+            const auto& names = flybackPtr->get_per_op_name();
+            const auto& dC   = flybackPtr->get_per_op_duty_cycle();
+            const auto& fsw  = flybackPtr->get_per_op_switching_frequency();
+            const auto& iAvg = flybackPtr->get_per_op_primary_average_current();
+            const auto& iPP  = flybackPtr->get_per_op_primary_peak_to_peak();
+            const auto& iPk  = flybackPtr->get_per_op_primary_peak_current();
+            const auto& iSec = flybackPtr->get_per_op_secondary_peak_current();
+            const auto& ccm  = flybackPtr->get_per_op_is_ccm();
+            diag["dutyCycle"]             = dC.empty()   ? flybackPtr->get_last_duty_cycle()              : dC.front();
+            diag["switchingFrequency"]    = fsw.empty()  ? 0.0                                            : fsw.front();
+            diag["primaryAverageCurrent"] = iAvg.empty() ? 0.0                                            : iAvg.front();
+            diag["primaryPeakToPeak"]     = iPP.empty()  ? 0.0                                            : iPP.front();
+            diag["primaryPeakCurrent"]    = iPk.empty()  ? 0.0                                            : iPk.front();
+            diag["secondaryPeakCurrent"]  = iSec.empty() ? 0.0                                            : iSec.front();
+            diag["isCcm"]                 = ccm.empty()  ? false                                          : (bool)ccm.front();
+            json perOp = json::array();
+            for (size_t i = 0; i < dC.size(); ++i) {
+                json row;
+                row["operatingPointName"]    = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["dutyCycle"]             = dC[i];
+                row["switchingFrequency"]    = fsw[i];
+                row["primaryAverageCurrent"] = iAvg[i];
+                row["primaryPeakToPeak"]     = iPP[i];
+                row["primaryPeakCurrent"]    = iPk[i];
+                row["secondaryPeakCurrent"]  = iSec[i];
+                row["isCcm"]                 = (bool)ccm[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+            result["flybackDiagnostics"] = diag;
+        }
+
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_flyback_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+json simulate_flyback_with_magnetic(json inputsJson, json magneticJson) {
+    try {
+        OpenMagnetics::AdvancedFlyback converter(inputsJson);
+
+        double magnetizingInductance = converter.get_desired_inductance();
+        std::vector<double> turnsRatios = converter.get_desired_turns_ratios();
+
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) {
+            throw std::runtime_error("ngspice simulation is required but ngspice is not available");
+        }
+
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5);
+        converter.set_num_periods_to_extract(numberOfPeriods);
+        converter.set_num_steady_state_periods(numberOfSteadyStatePeriods);
+
+        auto topologyWaveforms = converter.simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance, numberOfPeriods);
+        auto operatingPoints = converter.simulate_and_extract_operating_points(turnsRatios, magnetizingInductance, numberOfPeriods);
+
+        json result;
+        json inputs;
+        auto designRequirements = converter.process_design_requirements();
+        inputs["designRequirements"] = json();
+        to_json(inputs["designRequirements"], designRequirements);
+        inputs["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); }
+        result["inputs"] = inputs;
+
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_flyback_with_magnetic: ") + exc.what()}};
+    }
+}
+
+// ------ Helper macro for non-isolated single-inductor topologies (Buck/Boost pattern) ------
+#define DEFINE_SIMULATE_NON_ISOLATED(func_name, BaseType, AdvancedType, TopologyEnum, diagKey, \
+    DIAG_FLAT, DIAG_PEROP) \
+json func_name(json inputsJson) { \
+    try { \
+        bool isAdvanced = inputsJson.contains("desiredInductance"); \
+        OpenMagnetics::DesignRequirements designRequirements; \
+        double inductance; \
+        std::unique_ptr<BaseType> ptr; \
+        if (isAdvanced) { \
+            auto advPtr = std::make_unique<AdvancedType>(inputsJson); \
+            inductance = advPtr->get_desired_inductance(); \
+            designRequirements.get_mutable_turns_ratios().clear(); \
+            OpenMagnetics::DimensionWithTolerance inductanceTol; \
+            inductanceTol.set_nominal(inductance); \
+            designRequirements.set_magnetizing_inductance(inductanceTol); \
+            std::vector<OpenMagnetics::IsolationSide> isolationSides; \
+            isolationSides.push_back(OpenMagnetics::get_isolation_side_from_index(0)); \
+            designRequirements.set_isolation_sides(isolationSides); \
+            designRequirements.set_topology(TopologyEnum); \
+            ptr = std::move(advPtr); \
+        } else { \
+            ptr = std::make_unique<BaseType>(inputsJson); \
+            designRequirements = ptr->process_design_requirements(); \
+            inductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance()); \
+            if (!(inductance > 0)) { \
+                throw std::runtime_error("Unable to calculate inductance"); \
+            } \
+        } \
+        OpenMagnetics::NgspiceRunner runner; \
+        if (!runner.is_available()) { \
+            throw std::runtime_error("ngspice simulation is required but ngspice is not available"); \
+        } \
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2); \
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5); \
+        ptr->set_num_periods_to_extract(numberOfPeriods); \
+        ptr->set_num_steady_state_periods(numberOfSteadyStatePeriods); \
+        auto topologyWaveforms = ptr->simulate_and_extract_topology_waveforms(inductance); \
+        auto operatingPoints = ptr->simulate_and_extract_operating_points(inductance); \
+        json result; \
+        json inputs; \
+        inputs["designRequirements"] = json(); \
+        to_json(inputs["designRequirements"], designRequirements); \
+        inputs["operatingPoints"] = json::array(); \
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); } \
+        result["inputs"] = inputs; \
+        result["converterWaveforms"] = json::array(); \
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); } \
+        ptr->process(); \
+        { \
+            json diag; \
+            DIAG_FLAT \
+            json perOp = json::array(); \
+            DIAG_PEROP \
+            diag["perOp"] = perOp; \
+            result[diagKey] = diag; \
+        } \
+        return result; \
+    } \
+    catch (const std::exception& exc) { \
+        return json{{"error", std::string(#func_name ": ") + exc.what()}}; \
+    } \
+}
+
+// Buck diagnostics
+#define BUCK_BOOST_DIAG_FLAT \
+    const auto& names = ptr->get_per_op_name(); \
+    const auto& dC    = ptr->get_per_op_duty_cycle(); \
+    const auto& iAvg  = ptr->get_per_op_inductor_average_current(); \
+    const auto& iPP   = ptr->get_per_op_inductor_peak_to_peak(); \
+    const auto& iPk   = ptr->get_per_op_peak_inductor_current(); \
+    const auto& ccm   = ptr->get_per_op_is_ccm(); \
+    const auto& cRat  = ptr->get_per_op_conduction_ratio(); \
+    diag["dutyCycle"]              = dC.empty()   ? ptr->get_last_duty_cycle()              : dC.front(); \
+    diag["inductorAverageCurrent"] = iAvg.empty() ? ptr->get_last_inductor_average_current() : iAvg.front(); \
+    diag["inductorPeakToPeak"]     = iPP.empty()  ? ptr->get_last_inductor_peak_to_peak()    : iPP.front(); \
+    diag["peakInductorCurrent"]    = iPk.empty()  ? ptr->get_last_peak_inductor_current()    : iPk.front(); \
+    diag["conductionRatio"]        = cRat.empty() ? ptr->get_last_conduction_ratio()         : cRat.front(); \
+    diag["isCcm"]                  = ccm.empty()  ? ptr->get_last_is_ccm()                   : (bool)ccm.front();
+
+#define BUCK_BOOST_DIAG_PEROP \
+    for (size_t i = 0; i < dC.size(); ++i) { \
+        json row; \
+        row["operatingPointName"]    = (i < names.size()) ? names[i] : ("OP " + std::to_string(i)); \
+        row["dutyCycle"]             = dC[i]; \
+        row["inductorAverageCurrent"] = iAvg[i]; \
+        row["inductorPeakToPeak"]    = iPP[i]; \
+        row["peakInductorCurrent"]   = iPk[i]; \
+        row["conductionRatio"]       = cRat[i]; \
+        row["isCcm"]                 = (bool)ccm[i]; \
+        perOp.push_back(row); \
+    }
+
+DEFINE_SIMULATE_NON_ISOLATED(simulate_buck_ideal_waveforms, OpenMagnetics::Buck, OpenMagnetics::AdvancedBuck,
+    MAS::Topologies::BUCK_CONVERTER, "buckDiagnostics", BUCK_BOOST_DIAG_FLAT, BUCK_BOOST_DIAG_PEROP)
+
+DEFINE_SIMULATE_NON_ISOLATED(simulate_boost_ideal_waveforms, OpenMagnetics::Boost, OpenMagnetics::AdvancedBoost,
+    MAS::Topologies::BOOST_CONVERTER, "boostDiagnostics", BUCK_BOOST_DIAG_FLAT, BUCK_BOOST_DIAG_PEROP)
+
+#undef BUCK_BOOST_DIAG_FLAT
+#undef BUCK_BOOST_DIAG_PEROP
+
+// ------ Coupling topologies (Sepic/Cuk/Zeta): single inductance L1, coupling diagnostics ------
+
+#define COUPLING_DIAG_FLAT \
+    const auto& names = ptr->get_per_op_name(); \
+    const auto& v_duty_cycle = ptr->get_per_op_duty_cycle(); \
+    const auto& v_conversion_ratio = ptr->get_per_op_conversion_ratio(); \
+    const auto& v_coupling_cap_voltage = ptr->get_per_op_coupling_cap_voltage(); \
+    const auto& v_input_inductor_average = ptr->get_per_op_input_inductor_average(); \
+    const auto& v_output_inductor_average = ptr->get_per_op_output_inductor_average(); \
+    const auto& v_input_inductor_ripple = ptr->get_per_op_input_inductor_ripple(); \
+    const auto& v_output_inductor_ripple = ptr->get_per_op_output_inductor_ripple(); \
+    const auto& v_switch_peak_voltage = ptr->get_per_op_switch_peak_voltage(); \
+    const auto& v_switch_peak_current = ptr->get_per_op_switch_peak_current(); \
+    const auto& v_diode_peak_reverse_voltage = ptr->get_per_op_diode_peak_reverse_voltage(); \
+    const auto& v_diode_peak_current = ptr->get_per_op_diode_peak_current(); \
+    const auto& v_coupling_cap_rms_current = ptr->get_per_op_coupling_cap_rms_current(); \
+    const auto& v_is_ccm = ptr->get_per_op_is_ccm(); \
+    diag["dutyCycle"] = v_duty_cycle.empty() ? ptr->get_last_duty_cycle() : v_duty_cycle.front(); \
+    diag["conversionRatio"] = v_conversion_ratio.empty() ? ptr->get_last_conversion_ratio() : v_conversion_ratio.front(); \
+    diag["couplingCapVoltage"] = v_coupling_cap_voltage.empty() ? ptr->get_last_coupling_cap_voltage() : v_coupling_cap_voltage.front(); \
+    diag["inputInductorAverage"] = v_input_inductor_average.empty() ? ptr->get_last_input_inductor_average() : v_input_inductor_average.front(); \
+    diag["outputInductorAverage"] = v_output_inductor_average.empty() ? ptr->get_last_output_inductor_average() : v_output_inductor_average.front(); \
+    diag["inputInductorRipple"] = v_input_inductor_ripple.empty() ? ptr->get_last_input_inductor_ripple() : v_input_inductor_ripple.front(); \
+    diag["outputInductorRipple"] = v_output_inductor_ripple.empty() ? ptr->get_last_output_inductor_ripple() : v_output_inductor_ripple.front(); \
+    diag["switchPeakVoltage"] = v_switch_peak_voltage.empty() ? ptr->get_last_switch_peak_voltage() : v_switch_peak_voltage.front(); \
+    diag["switchPeakCurrent"] = v_switch_peak_current.empty() ? ptr->get_last_switch_peak_current() : v_switch_peak_current.front(); \
+    diag["diodePeakReverseVoltage"] = v_diode_peak_reverse_voltage.empty() ? ptr->get_last_diode_peak_reverse_voltage() : v_diode_peak_reverse_voltage.front(); \
+    diag["diodePeakCurrent"] = v_diode_peak_current.empty() ? ptr->get_last_diode_peak_current() : v_diode_peak_current.front(); \
+    diag["couplingCapRmsCurrent"] = v_coupling_cap_rms_current.empty() ? ptr->get_last_coupling_cap_rms_current() : v_coupling_cap_rms_current.front(); \
+    diag["isCcm"] = v_is_ccm.empty() ? ptr->get_last_is_ccm() : (bool)v_is_ccm.front();
+
+#define COUPLING_DIAG_PEROP_BASE \
+    for (size_t i = 0; i < v_duty_cycle.size(); ++i) { \
+        json row; \
+        row["operatingPointName"] = (i < names.size()) ? names[i] : ("OP " + std::to_string(i)); \
+        row["dutyCycle"] = v_duty_cycle[i]; \
+        row["conversionRatio"] = v_conversion_ratio[i]; \
+        row["couplingCapVoltage"] = v_coupling_cap_voltage[i]; \
+        row["inputInductorAverage"] = v_input_inductor_average[i]; \
+        row["outputInductorAverage"] = v_output_inductor_average[i]; \
+        row["inputInductorRipple"] = v_input_inductor_ripple[i]; \
+        row["outputInductorRipple"] = v_output_inductor_ripple[i]; \
+        row["switchPeakVoltage"] = v_switch_peak_voltage[i]; \
+        row["switchPeakCurrent"] = v_switch_peak_current[i]; \
+        row["diodePeakReverseVoltage"] = v_diode_peak_reverse_voltage[i]; \
+        row["diodePeakCurrent"] = v_diode_peak_current[i]; \
+        row["couplingCapRmsCurrent"] = v_coupling_cap_rms_current[i]; \
+        row["isCcm"] = (bool)v_is_ccm[i];
+
+// Sepic: sizedCs, sizedCo
+json simulate_sepic_ideal_waveforms(json inputsJson) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        OpenMagnetics::DesignRequirements designRequirements;
+        double inductanceL1;
+        std::unique_ptr<OpenMagnetics::Sepic> ptr;
+        if (isAdvanced) {
+            auto advPtr = std::make_unique<OpenMagnetics::AdvancedSepic>(inputsJson);
+            inductanceL1 = advPtr->get_desired_inductance();
+            designRequirements.get_mutable_turns_ratios().clear();
+            OpenMagnetics::DimensionWithTolerance inductanceTol;
+            inductanceTol.set_nominal(inductanceL1);
+            designRequirements.set_magnetizing_inductance(inductanceTol);
+            std::vector<OpenMagnetics::IsolationSide> isolationSides;
+            isolationSides.push_back(OpenMagnetics::get_isolation_side_from_index(0));
+            designRequirements.set_isolation_sides(isolationSides);
+            designRequirements.set_topology(MAS::Topologies::SEPIC_CONVERTER);
+            ptr = std::move(advPtr);
+        } else {
+            ptr = std::make_unique<OpenMagnetics::Sepic>(inputsJson);
+            designRequirements = ptr->process_design_requirements();
+            inductanceL1 = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductanceL1 > 0)) throw std::runtime_error("Unable to calculate inductance");
+        }
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5);
+        ptr->set_num_periods_to_extract(numberOfPeriods);
+        ptr->set_num_steady_state_periods(numberOfSteadyStatePeriods);
+        auto topologyWaveforms = ptr->simulate_and_extract_topology_waveforms(inductanceL1, numberOfPeriods);
+        auto operatingPoints = ptr->simulate_and_extract_operating_points(inductanceL1);
+        json result;
+        json inputs;
+        inputs["designRequirements"] = json();
+        to_json(inputs["designRequirements"], designRequirements);
+        inputs["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); }
+        result["inputs"] = inputs;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        ptr->process();
+        {
+            json diag;
+            COUPLING_DIAG_FLAT
+            const auto& v_sized_cs = ptr->get_per_op_sized_cs();
+            const auto& v_sized_co = ptr->get_per_op_sized_co();
+            diag["sizedCs"] = v_sized_cs.empty() ? ptr->get_last_sized_cs() : v_sized_cs.front();
+            diag["sizedCo"] = v_sized_co.empty() ? ptr->get_last_sized_co() : v_sized_co.front();
+            json perOp = json::array();
+            COUPLING_DIAG_PEROP_BASE
+                row["sizedCs"] = v_sized_cs[i];
+                row["sizedCo"] = v_sized_co[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+            result["sepicDiagnostics"] = diag;
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_sepic_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// Cuk: sizedCa, sizedCb, sizedCo, rhpZeroFrequency
+json simulate_cuk_ideal_waveforms(json inputsJson) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        OpenMagnetics::DesignRequirements designRequirements;
+        double inductanceL1;
+        std::unique_ptr<OpenMagnetics::Cuk> ptr;
+        if (isAdvanced) {
+            auto advPtr = std::make_unique<OpenMagnetics::AdvancedCuk>(inputsJson);
+            inductanceL1 = advPtr->get_desired_inductance();
+            designRequirements.get_mutable_turns_ratios().clear();
+            OpenMagnetics::DimensionWithTolerance inductanceTol;
+            inductanceTol.set_nominal(inductanceL1);
+            designRequirements.set_magnetizing_inductance(inductanceTol);
+            std::vector<OpenMagnetics::IsolationSide> isolationSides;
+            isolationSides.push_back(OpenMagnetics::get_isolation_side_from_index(0));
+            designRequirements.set_isolation_sides(isolationSides);
+            designRequirements.set_topology(MAS::Topologies::CUK_CONVERTER);
+            ptr = std::move(advPtr);
+        } else {
+            ptr = std::make_unique<OpenMagnetics::Cuk>(inputsJson);
+            designRequirements = ptr->process_design_requirements();
+            inductanceL1 = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductanceL1 > 0)) throw std::runtime_error("Unable to calculate inductance");
+        }
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5);
+        ptr->set_num_periods_to_extract(numberOfPeriods);
+        ptr->set_num_steady_state_periods(numberOfSteadyStatePeriods);
+        auto operatingPoints = ptr->simulate_and_extract_operating_points(inductanceL1);
+        auto topologyWaveforms = ptr->simulate_and_extract_topology_waveforms(inductanceL1, numberOfPeriods);
+        json result;
+        json inputs;
+        inputs["designRequirements"] = json();
+        to_json(inputs["designRequirements"], designRequirements);
+        inputs["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); }
+        result["inputs"] = inputs;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        ptr->process();
+        {
+            json diag;
+            COUPLING_DIAG_FLAT
+            const auto& v_sized_ca = ptr->get_per_op_sized_ca();
+            const auto& v_sized_cb = ptr->get_per_op_sized_cb();
+            const auto& v_sized_co = ptr->get_per_op_sized_co();
+            const auto& v_rhp_zero_frequency = ptr->get_per_op_rhp_zero_frequency();
+            diag["sizedCa"] = v_sized_ca.empty() ? ptr->get_last_sized_ca() : v_sized_ca.front();
+            diag["sizedCb"] = v_sized_cb.empty() ? ptr->get_last_sized_cb() : v_sized_cb.front();
+            diag["sizedCo"] = v_sized_co.empty() ? ptr->get_last_sized_co() : v_sized_co.front();
+            diag["rhpZeroFrequency"] = v_rhp_zero_frequency.empty() ? ptr->get_last_rhp_zero_frequency() : v_rhp_zero_frequency.front();
+            json perOp = json::array();
+            COUPLING_DIAG_PEROP_BASE
+                row["sizedCa"] = v_sized_ca[i];
+                row["sizedCb"] = v_sized_cb[i];
+                row["sizedCo"] = v_sized_co[i];
+                row["rhpZeroFrequency"] = v_rhp_zero_frequency[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+            result["cukDiagnostics"] = diag;
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_cuk_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// Zeta: sizedCc, sizedCo, outputVoltageRipple, inputCurrentRipple
+json simulate_zeta_ideal_waveforms(json inputsJson) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        OpenMagnetics::DesignRequirements designRequirements;
+        double inductanceL1;
+        std::unique_ptr<OpenMagnetics::Zeta> ptr;
+        if (isAdvanced) {
+            auto advPtr = std::make_unique<OpenMagnetics::AdvancedZeta>(inputsJson);
+            inductanceL1 = advPtr->get_desired_inductance();
+            designRequirements.get_mutable_turns_ratios().clear();
+            OpenMagnetics::DimensionWithTolerance inductanceTol;
+            inductanceTol.set_nominal(inductanceL1);
+            designRequirements.set_magnetizing_inductance(inductanceTol);
+            std::vector<OpenMagnetics::IsolationSide> isolationSides;
+            isolationSides.push_back(OpenMagnetics::get_isolation_side_from_index(0));
+            designRequirements.set_isolation_sides(isolationSides);
+            designRequirements.set_topology(MAS::Topologies::ZETA_CONVERTER);
+            ptr = std::move(advPtr);
+        } else {
+            ptr = std::make_unique<OpenMagnetics::Zeta>(inputsJson);
+            designRequirements = ptr->process_design_requirements();
+            inductanceL1 = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductanceL1 > 0)) throw std::runtime_error("Unable to calculate inductance");
+        }
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5);
+        ptr->set_num_periods_to_extract(numberOfPeriods);
+        ptr->set_num_steady_state_periods(numberOfSteadyStatePeriods);
+        auto operatingPoints = ptr->simulate_and_extract_operating_points(inductanceL1);
+        auto topologyWaveforms = ptr->simulate_and_extract_topology_waveforms(inductanceL1, numberOfPeriods);
+        json result;
+        json inputs;
+        inputs["designRequirements"] = json();
+        to_json(inputs["designRequirements"], designRequirements);
+        inputs["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); }
+        result["inputs"] = inputs;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        ptr->process();
+        {
+            json diag;
+            COUPLING_DIAG_FLAT
+            const auto& v_sized_cc = ptr->get_per_op_sized_cc();
+            const auto& v_sized_co = ptr->get_per_op_sized_co();
+            const auto& v_output_voltage_ripple = ptr->get_per_op_output_voltage_ripple();
+            const auto& v_input_current_ripple = ptr->get_per_op_input_current_ripple();
+            diag["sizedCc"] = v_sized_cc.empty() ? ptr->get_last_sized_cc() : v_sized_cc.front();
+            diag["sizedCo"] = v_sized_co.empty() ? ptr->get_last_sized_co() : v_sized_co.front();
+            diag["outputVoltageRipple"] = v_output_voltage_ripple.empty() ? ptr->get_last_output_voltage_ripple() : v_output_voltage_ripple.front();
+            diag["inputCurrentRipple"] = v_input_current_ripple.empty() ? ptr->get_last_input_current_ripple() : v_input_current_ripple.front();
+            json perOp = json::array();
+            COUPLING_DIAG_PEROP_BASE
+                row["sizedCc"] = v_sized_cc[i];
+                row["sizedCo"] = v_sized_co[i];
+                row["outputVoltageRipple"] = v_output_voltage_ripple[i];
+                row["inputCurrentRipple"] = v_input_current_ripple[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+            result["zetaDiagnostics"] = diag;
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_zeta_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+#undef COUPLING_DIAG_FLAT
+#undef COUPLING_DIAG_PEROP_BASE
+
+// ------ FourSwitchBuckBoost (single inductance, FSBB diagnostics) ------
+json simulate_four_switch_buck_boost_ideal_waveforms(json inputsJson) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        OpenMagnetics::DesignRequirements designRequirements;
+        double inductance;
+        std::unique_ptr<OpenMagnetics::FourSwitchBuckBoost> ptr;
+        if (isAdvanced) {
+            auto advPtr = std::make_unique<OpenMagnetics::AdvancedFourSwitchBuckBoost>(inputsJson);
+            inductance = advPtr->get_desired_inductance();
+            designRequirements.get_mutable_turns_ratios().clear();
+            OpenMagnetics::DimensionWithTolerance inductanceTol;
+            inductanceTol.set_nominal(inductance);
+            designRequirements.set_magnetizing_inductance(inductanceTol);
+            std::vector<OpenMagnetics::IsolationSide> isolationSides;
+            isolationSides.push_back(OpenMagnetics::get_isolation_side_from_index(0));
+            designRequirements.set_isolation_sides(isolationSides);
+            designRequirements.set_topology(MAS::Topologies::FOUR_SWITCH_BUCK_BOOST_CONVERTER);
+            ptr = std::move(advPtr);
+        } else {
+            ptr = std::make_unique<OpenMagnetics::FourSwitchBuckBoost>(inputsJson);
+            designRequirements = ptr->process_design_requirements();
+            inductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductance > 0)) throw std::runtime_error("Unable to calculate inductance");
+        }
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5);
+        ptr->set_num_periods_to_extract(numberOfPeriods);
+        ptr->set_num_steady_state_periods(numberOfSteadyStatePeriods);
+        auto operatingPoints = ptr->simulate_and_extract_operating_points(inductance);
+        auto topologyWaveforms = ptr->simulate_and_extract_topology_waveforms(inductance, numberOfPeriods);
+        json result;
+        json inputs;
+        inputs["designRequirements"] = json();
+        to_json(inputs["designRequirements"], designRequirements);
+        inputs["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); }
+        result["inputs"] = inputs;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        ptr->process();
+        {
+            json diag;
+            const auto& names = ptr->get_per_op_name();
+            const auto& v_inductor_average_current = ptr->get_per_op_inductor_average_current();
+            const auto& v_sized_output_capacitance = ptr->get_per_op_sized_output_capacitance();
+            diag["inductorAverageCurrent"] = v_inductor_average_current.empty() ? ptr->get_last_inductor_average_current() : v_inductor_average_current.front();
+            diag["sizedOutputCapacitance"] = v_sized_output_capacitance.empty() ? ptr->get_last_sized_output_capacitance() : v_sized_output_capacitance.front();
+            json perOp = json::array();
+            for (size_t i = 0; i < v_inductor_average_current.size(); ++i) {
+                json row;
+                row["operatingPointName"] = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["inductorAverageCurrent"] = v_inductor_average_current[i];
+                row["sizedOutputCapacitance"] = v_sized_output_capacitance[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+            result["fourSwitchBuckBoostDiagnostics"] = diag;
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_four_switch_buck_boost_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// ------ Helper macro for isolated topologies with turnsRatios + magnetizingInductance ------
+// Used by Forward, TwoSwitchForward, ActiveClampForward, PushPull, IsolatedBuck, IsolatedBuckBoost, Weinberg
+#define DEFINE_SIMULATE_ISOLATED(func_name, BaseType, AdvancedType, TopologyEnum, diagKey, \
+    SIM_WAVEFORM_CALL, SIM_OP_CALL, DIAG_BLOCK) \
+json func_name(json inputsJson) { \
+    try { \
+        bool isAdvanced = inputsJson.contains("desiredInductance"); \
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2); \
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5); \
+        OpenMagnetics::DesignRequirements designRequirements; \
+        double magnetizingInductance; \
+        std::vector<double> turnsRatios; \
+        std::unique_ptr<BaseType> ptr; \
+        if (isAdvanced) { \
+            auto advPtr = std::make_unique<AdvancedType>(inputsJson); \
+            magnetizingInductance = advPtr->get_desired_inductance(); \
+            turnsRatios = advPtr->get_desired_turns_ratios(); \
+            designRequirements.get_mutable_turns_ratios().clear(); \
+            for (auto tr : turnsRatios) { \
+                OpenMagnetics::DimensionWithTolerance trTol; \
+                trTol.set_nominal(tr); \
+                designRequirements.get_mutable_turns_ratios().push_back(trTol); \
+            } \
+            OpenMagnetics::DimensionWithTolerance inductanceTol; \
+            inductanceTol.set_nominal(magnetizingInductance); \
+            designRequirements.set_magnetizing_inductance(inductanceTol); \
+            designRequirements.set_topology(TopologyEnum); \
+            ptr = std::move(advPtr); \
+        } else { \
+            ptr = std::make_unique<BaseType>(inputsJson); \
+            designRequirements = ptr->process_design_requirements(); \
+            for (const auto& tr : designRequirements.get_turns_ratios()) { \
+                if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value()); \
+            } \
+            magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance()); \
+            if (!(magnetizingInductance > 0)) throw std::runtime_error("Unable to calculate inductance"); \
+        } \
+        ptr->set_num_periods_to_extract(numberOfPeriods); \
+        ptr->set_num_steady_state_periods(numberOfSteadyStatePeriods); \
+        OpenMagnetics::NgspiceRunner runner; \
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available"); \
+        auto topologyWaveforms = SIM_WAVEFORM_CALL; \
+        auto operatingPoints = SIM_OP_CALL; \
+        json result; \
+        json inputs; \
+        inputs["designRequirements"] = json(); \
+        to_json(inputs["designRequirements"], designRequirements); \
+        inputs["operatingPoints"] = json::array(); \
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); } \
+        result["inputs"] = inputs; \
+        result["converterWaveforms"] = json::array(); \
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); } \
+        ptr->process(); \
+        DIAG_BLOCK \
+        return result; \
+    } \
+    catch (const std::exception& exc) { \
+        return json{{"error", std::string(#func_name ": ") + exc.what()}}; \
+    } \
+}
+
+// SingleSwitchForward diagnostics (has primaryTurnsRatio + resetVoltage)
+#define SINGLE_SWITCH_FORWARD_DIAG_BLOCK \
+    { \
+        json diag; \
+        const auto& names = ptr->get_per_op_name(); \
+        const auto& v_maximum_duty_cycle = ptr->get_per_op_maximum_duty_cycle(); \
+        const auto& v_computed_magnetizing_inductance = ptr->get_per_op_computed_magnetizing_inductance(); \
+        const auto& v_computed_secondary_turns_ratio = ptr->get_per_op_computed_secondary_turns_ratio(); \
+        const auto& v_primary_peak_current = ptr->get_per_op_primary_peak_current(); \
+        const auto& v_secondary_peak_current = ptr->get_per_op_secondary_peak_current(); \
+        const auto& v_magnetizing_peak_current = ptr->get_per_op_magnetizing_peak_current(); \
+        const auto& v_is_ccm = ptr->get_per_op_is_ccm(); \
+        const auto& v_computed_primary_turns_ratio = ptr->get_per_op_computed_primary_turns_ratio(); \
+        const auto& v_reset_voltage = ptr->get_per_op_reset_voltage(); \
+        diag["maximumDutyCycle"] = v_maximum_duty_cycle.empty() ? ptr->get_last_maximum_duty_cycle() : v_maximum_duty_cycle.front(); \
+        diag["magnetizingInductance"] = v_computed_magnetizing_inductance.empty() ? ptr->get_last_computed_magnetizing_inductance() : v_computed_magnetizing_inductance.front(); \
+        diag["secondaryTurnsRatio"] = v_computed_secondary_turns_ratio.empty() ? ptr->get_last_computed_secondary_turns_ratio() : v_computed_secondary_turns_ratio.front(); \
+        diag["primaryPeakCurrent"] = v_primary_peak_current.empty() ? ptr->get_last_primary_peak_current() : v_primary_peak_current.front(); \
+        diag["secondaryPeakCurrent"] = v_secondary_peak_current.empty() ? ptr->get_last_secondary_peak_current() : v_secondary_peak_current.front(); \
+        diag["magnetizingPeakCurrent"] = v_magnetizing_peak_current.empty() ? ptr->get_last_magnetizing_peak_current() : v_magnetizing_peak_current.front(); \
+        diag["isCcm"] = v_is_ccm.empty() ? ptr->get_last_is_ccm() : (bool)v_is_ccm.front(); \
+        diag["primaryTurnsRatio"] = v_computed_primary_turns_ratio.empty() ? ptr->get_last_computed_primary_turns_ratio() : v_computed_primary_turns_ratio.front(); \
+        diag["resetVoltage"] = v_reset_voltage.empty() ? ptr->get_last_reset_voltage() : v_reset_voltage.front(); \
+        json perOp = json::array(); \
+        for (size_t i = 0; i < v_maximum_duty_cycle.size(); ++i) { \
+            json row; \
+            row["operatingPointName"] = (i < names.size()) ? names[i] : ("OP " + std::to_string(i)); \
+            row["maximumDutyCycle"] = v_maximum_duty_cycle[i]; \
+            row["magnetizingInductance"] = v_computed_magnetizing_inductance[i]; \
+            row["secondaryTurnsRatio"] = v_computed_secondary_turns_ratio[i]; \
+            row["primaryPeakCurrent"] = v_primary_peak_current[i]; \
+            row["secondaryPeakCurrent"] = v_secondary_peak_current[i]; \
+            row["magnetizingPeakCurrent"] = v_magnetizing_peak_current[i]; \
+            row["isCcm"] = (bool)v_is_ccm[i]; \
+            row["primaryTurnsRatio"] = v_computed_primary_turns_ratio[i]; \
+            row["resetVoltage"] = v_reset_voltage[i]; \
+            perOp.push_back(row); \
+        } \
+        diag["perOp"] = perOp; \
+        result["singleSwitchForwardDiagnostics"] = diag; \
+    }
+
+// Common forward diagnostics (TwoSwitchForward, ActiveClampForward, PushPull — no primaryTurnsRatio/resetVoltage)
+#define FORWARD_COMMON_DIAG_BLOCK(diagKeyStr) \
+    { \
+        json diag; \
+        const auto& names = ptr->get_per_op_name(); \
+        const auto& v_maximum_duty_cycle = ptr->get_per_op_maximum_duty_cycle(); \
+        const auto& v_computed_magnetizing_inductance = ptr->get_per_op_computed_magnetizing_inductance(); \
+        const auto& v_computed_secondary_turns_ratio = ptr->get_per_op_computed_secondary_turns_ratio(); \
+        const auto& v_primary_peak_current = ptr->get_per_op_primary_peak_current(); \
+        const auto& v_secondary_peak_current = ptr->get_per_op_secondary_peak_current(); \
+        const auto& v_magnetizing_peak_current = ptr->get_per_op_magnetizing_peak_current(); \
+        const auto& v_is_ccm = ptr->get_per_op_is_ccm(); \
+        diag["maximumDutyCycle"] = v_maximum_duty_cycle.empty() ? ptr->get_last_maximum_duty_cycle() : v_maximum_duty_cycle.front(); \
+        diag["magnetizingInductance"] = v_computed_magnetizing_inductance.empty() ? ptr->get_last_computed_magnetizing_inductance() : v_computed_magnetizing_inductance.front(); \
+        diag["secondaryTurnsRatio"] = v_computed_secondary_turns_ratio.empty() ? ptr->get_last_computed_secondary_turns_ratio() : v_computed_secondary_turns_ratio.front(); \
+        diag["primaryPeakCurrent"] = v_primary_peak_current.empty() ? ptr->get_last_primary_peak_current() : v_primary_peak_current.front(); \
+        diag["secondaryPeakCurrent"] = v_secondary_peak_current.empty() ? ptr->get_last_secondary_peak_current() : v_secondary_peak_current.front(); \
+        diag["magnetizingPeakCurrent"] = v_magnetizing_peak_current.empty() ? ptr->get_last_magnetizing_peak_current() : v_magnetizing_peak_current.front(); \
+        diag["isCcm"] = v_is_ccm.empty() ? ptr->get_last_is_ccm() : (bool)v_is_ccm.front(); \
+        json perOp = json::array(); \
+        for (size_t i = 0; i < v_maximum_duty_cycle.size(); ++i) { \
+            json row; \
+            row["operatingPointName"] = (i < names.size()) ? names[i] : ("OP " + std::to_string(i)); \
+            row["maximumDutyCycle"] = v_maximum_duty_cycle[i]; \
+            row["magnetizingInductance"] = v_computed_magnetizing_inductance[i]; \
+            row["secondaryTurnsRatio"] = v_computed_secondary_turns_ratio[i]; \
+            row["primaryPeakCurrent"] = v_primary_peak_current[i]; \
+            row["secondaryPeakCurrent"] = v_secondary_peak_current[i]; \
+            row["magnetizingPeakCurrent"] = v_magnetizing_peak_current[i]; \
+            row["isCcm"] = (bool)v_is_ccm[i]; \
+            perOp.push_back(row); \
+        } \
+        diag["perOp"] = perOp; \
+        result[diagKeyStr] = diag; \
+    }
+
+// IsolatedBuck/IsolatedBuckBoost diagnostics — takes diagKeyStr so the
+// expansion works inside DEFINE_SIMULATE_ISOLATED (diagKey is a macro
+// parameter there, not a C++ variable).
+#define ISOLATED_BUCK_DIAG_BLOCK(diagKeyStr) \
+    { \
+        json diag; \
+        const auto& names = ptr->get_per_op_name(); \
+        const auto& v_duty_cycle = ptr->get_per_op_duty_cycle(); \
+        const auto& v_magnetizing_current_ripple = ptr->get_per_op_magnetizing_current_ripple(); \
+        const auto& v_primary_average_current = ptr->get_per_op_primary_average_current(); \
+        const auto& v_primary_peak_current = ptr->get_per_op_primary_peak_current(); \
+        const auto& v_secondary_peak_current = ptr->get_per_op_secondary_peak_current(); \
+        const auto& v_is_ccm = ptr->get_per_op_is_ccm(); \
+        diag["dutyCycle"] = v_duty_cycle.empty() ? ptr->get_last_duty_cycle() : v_duty_cycle.front(); \
+        diag["magnetizingCurrentRipple"] = v_magnetizing_current_ripple.empty() ? ptr->get_last_magnetizing_current_ripple() : v_magnetizing_current_ripple.front(); \
+        diag["primaryAverageCurrent"] = v_primary_average_current.empty() ? ptr->get_last_primary_average_current() : v_primary_average_current.front(); \
+        diag["primaryPeakCurrent"] = v_primary_peak_current.empty() ? ptr->get_last_primary_peak_current() : v_primary_peak_current.front(); \
+        diag["secondaryPeakCurrent"] = v_secondary_peak_current.empty() ? ptr->get_last_secondary_peak_current() : v_secondary_peak_current.front(); \
+        diag["isCcm"] = v_is_ccm.empty() ? ptr->get_last_is_ccm() : (bool)v_is_ccm.front(); \
+        json perOp = json::array(); \
+        for (size_t i = 0; i < v_duty_cycle.size(); ++i) { \
+            json row; \
+            row["operatingPointName"] = (i < names.size()) ? names[i] : ("OP " + std::to_string(i)); \
+            row["dutyCycle"] = v_duty_cycle[i]; \
+            row["magnetizingCurrentRipple"] = v_magnetizing_current_ripple[i]; \
+            row["primaryAverageCurrent"] = v_primary_average_current[i]; \
+            row["primaryPeakCurrent"] = v_primary_peak_current[i]; \
+            row["secondaryPeakCurrent"] = v_secondary_peak_current[i]; \
+            row["isCcm"] = (bool)v_is_ccm[i]; \
+            perOp.push_back(row); \
+        } \
+        diag["perOp"] = perOp; \
+        result[diagKeyStr] = diag; \
+    }
+
+DEFINE_SIMULATE_ISOLATED(simulate_forward_ideal_waveforms, OpenMagnetics::SingleSwitchForward, OpenMagnetics::AdvancedSingleSwitchForward,
+    MAS::Topologies::SINGLE_SWITCH_FORWARD_CONVERTER, "singleSwitchForwardDiagnostics",
+    ptr->simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance),
+    ptr->simulate_and_extract_operating_points(turnsRatios, magnetizingInductance),
+    SINGLE_SWITCH_FORWARD_DIAG_BLOCK)
+
+DEFINE_SIMULATE_ISOLATED(simulate_two_switch_forward_ideal_waveforms, OpenMagnetics::TwoSwitchForward, OpenMagnetics::AdvancedTwoSwitchForward,
+    MAS::Topologies::TWO_SWITCH_FORWARD_CONVERTER, "twoSwitchForwardDiagnostics",
+    ptr->simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance),
+    ptr->simulate_and_extract_operating_points(turnsRatios, magnetizingInductance),
+    FORWARD_COMMON_DIAG_BLOCK("twoSwitchForwardDiagnostics"))
+
+DEFINE_SIMULATE_ISOLATED(simulate_active_clamp_forward_ideal_waveforms, OpenMagnetics::ActiveClampForward, OpenMagnetics::AdvancedActiveClampForward,
+    MAS::Topologies::ACTIVE_CLAMP_FORWARD_CONVERTER, "activeClampForwardDiagnostics",
+    ptr->simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance),
+    ptr->simulate_and_extract_operating_points(turnsRatios, magnetizingInductance),
+    FORWARD_COMMON_DIAG_BLOCK("activeClampForwardDiagnostics"))
+
+DEFINE_SIMULATE_ISOLATED(simulate_push_pull_ideal_waveforms, OpenMagnetics::PushPull, OpenMagnetics::AdvancedPushPull,
+    MAS::Topologies::PUSH_PULL_CONVERTER, "pushPullDiagnostics",
+    ptr->simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance),
+    ptr->simulate_and_extract_operating_points(turnsRatios, magnetizingInductance),
+    { \
+        json diag; \
+        const auto& names = ptr->get_per_op_name(); \
+        const auto& v_duty_cycle = ptr->get_per_op_duty_cycle(); \
+        const auto& v_switching_frequency = ptr->get_per_op_switching_frequency(); \
+        const auto& v_primary_average_current = ptr->get_per_op_primary_average_current(); \
+        const auto& v_primary_peak_current = ptr->get_per_op_primary_peak_current(); \
+        const auto& v_magnetizing_peak_current = ptr->get_per_op_magnetizing_peak_current(); \
+        const auto& v_is_ccm = ptr->get_per_op_is_ccm(); \
+        diag["dutyCycle"] = v_duty_cycle.empty() ? ptr->get_last_duty_cycle() : v_duty_cycle.front(); \
+        diag["switchingFrequency"] = v_switching_frequency.empty() ? ptr->get_last_switching_frequency() : v_switching_frequency.front(); \
+        diag["primaryAverageCurrent"] = v_primary_average_current.empty() ? ptr->get_last_primary_average_current() : v_primary_average_current.front(); \
+        diag["primaryPeakCurrent"] = v_primary_peak_current.empty() ? ptr->get_last_primary_peak_current() : v_primary_peak_current.front(); \
+        diag["magnetizingPeakCurrent"] = v_magnetizing_peak_current.empty() ? ptr->get_last_magnetizing_peak_current() : v_magnetizing_peak_current.front(); \
+        diag["isCcm"] = v_is_ccm.empty() ? ptr->get_last_is_ccm() : (bool)v_is_ccm.front(); \
+        json perOp = json::array(); \
+        for (size_t i = 0; i < v_duty_cycle.size(); ++i) { \
+            json row; \
+            row["operatingPointName"] = (i < names.size()) ? names[i] : ("OP " + std::to_string(i)); \
+            row["dutyCycle"] = v_duty_cycle[i]; \
+            row["switchingFrequency"] = v_switching_frequency[i]; \
+            row["primaryAverageCurrent"] = v_primary_average_current[i]; \
+            row["primaryPeakCurrent"] = v_primary_peak_current[i]; \
+            row["magnetizingPeakCurrent"] = v_magnetizing_peak_current[i]; \
+            row["isCcm"] = (bool)v_is_ccm[i]; \
+            perOp.push_back(row); \
+        } \
+        diag["perOp"] = perOp; \
+        result["pushPullDiagnostics"] = diag; \
+    })
+
+DEFINE_SIMULATE_ISOLATED(simulate_isolated_buck_ideal_waveforms, OpenMagnetics::IsolatedBuck, OpenMagnetics::AdvancedIsolatedBuck,
+    MAS::Topologies::ISOLATED_BUCK_CONVERTER, "isolatedBuckDiagnostics",
+    ptr->simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance),
+    ptr->simulate_and_extract_operating_points(turnsRatios, magnetizingInductance),
+    ISOLATED_BUCK_DIAG_BLOCK("isolatedBuckDiagnostics"))
+
+DEFINE_SIMULATE_ISOLATED(simulate_isolated_buck_boost_ideal_waveforms, OpenMagnetics::IsolatedBuckBoost, OpenMagnetics::AdvancedIsolatedBuckBoost,
+    MAS::Topologies::ISOLATED_BUCK_BOOST_CONVERTER, "isolatedBuckBoostDiagnostics",
+    ptr->simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance),
+    ptr->simulate_and_extract_operating_points(turnsRatios, magnetizingInductance),
+    ISOLATED_BUCK_DIAG_BLOCK("isolatedBuckBoostDiagnostics"))
+
+#undef SINGLE_SWITCH_FORWARD_DIAG_BLOCK
+#undef FORWARD_COMMON_DIAG_BLOCK
+#undef ISOLATED_BUCK_DIAG_BLOCK
+
+// ------ Weinberg (scalar turnsRatio + magnetizingInductance) ------
+json simulate_weinberg_ideal_waveforms(json inputsJson) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5);
+        OpenMagnetics::DesignRequirements designRequirements;
+        double magnetizingInductance;
+        double turnsRatio;
+        std::unique_ptr<OpenMagnetics::Weinberg> ptr;
+        if (isAdvanced) {
+            auto advPtr = std::make_unique<OpenMagnetics::AdvancedWeinberg>(inputsJson);
+            magnetizingInductance = advPtr->get_desired_inductance();
+            turnsRatio = advPtr->get_desired_turns_ratio();
+            designRequirements = advPtr->process_design_requirements();
+            ptr = std::move(advPtr);
+        } else {
+            ptr = std::make_unique<OpenMagnetics::Weinberg>(inputsJson);
+            designRequirements = ptr->process_design_requirements();
+            if (designRequirements.get_turns_ratios().empty() || !designRequirements.get_turns_ratios()[0].get_nominal())
+                throw std::runtime_error("Weinberg: no turns ratio available");
+            turnsRatio = designRequirements.get_turns_ratios()[0].get_nominal().value();
+            magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(magnetizingInductance > 0)) throw std::runtime_error("Unable to calculate inductance");
+        }
+        ptr->set_num_periods_to_extract(numberOfPeriods);
+        ptr->set_num_steady_state_periods(numberOfSteadyStatePeriods);
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        auto operatingPoints = ptr->simulate_and_extract_operating_points(turnsRatio, magnetizingInductance);
+        auto topologyWaveforms = ptr->simulate_and_extract_topology_waveforms(turnsRatio, magnetizingInductance, numberOfPeriods);
+        json result;
+        json inputs;
+        inputs["designRequirements"] = json();
+        to_json(inputs["designRequirements"], designRequirements);
+        inputs["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); }
+        result["inputs"] = inputs;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        ptr->process();
+        {
+            json diag;
+            const auto& names = ptr->get_per_op_name();
+            const auto& v_duty_cycle = ptr->get_per_op_duty_cycle();
+            const auto& v_conversion_ratio = ptr->get_per_op_conversion_ratio();
+            const auto& v_operating_regime = ptr->get_per_op_operating_regime();
+            const auto& v_overlap_fraction = ptr->get_per_op_overlap_fraction();
+            const auto& v_switch_peak_voltage = ptr->get_per_op_switch_peak_voltage();
+            const auto& v_switch_peak_current = ptr->get_per_op_switch_peak_current();
+            const auto& v_diode_peak_reverse_voltage = ptr->get_per_op_diode_peak_reverse_voltage();
+            const auto& v_diode_peak_current = ptr->get_per_op_diode_peak_current();
+            const auto& v_energy_recovery_avg_current = ptr->get_per_op_energy_recovery_avg_current();
+            const auto& v_input_inductor_average = ptr->get_per_op_input_inductor_average();
+            const auto& v_input_inductor_ripple = ptr->get_per_op_input_inductor_ripple();
+            const auto& v_magnetizing_ripple = ptr->get_per_op_magnetizing_ripple();
+            const auto& v_flux_imbalance_margin = ptr->get_per_op_flux_imbalance_margin();
+            const auto& v_rhp_zero_frequency = ptr->get_per_op_rhp_zero_frequency();
+            const auto& v_is_ccm = ptr->get_per_op_is_ccm();
+            const auto& v_sized_co = ptr->get_per_op_sized_co();
+            const auto& v_output_voltage_ripple = ptr->get_per_op_output_voltage_ripple();
+            diag["dutyCycle"] = v_duty_cycle.empty() ? ptr->get_last_duty_cycle() : v_duty_cycle.front();
+            diag["conversionRatio"] = v_conversion_ratio.empty() ? ptr->get_last_conversion_ratio() : v_conversion_ratio.front();
+            diag["operatingRegime"] = v_operating_regime.empty() ? ptr->get_last_operating_regime() : v_operating_regime.front();
+            diag["overlapFraction"] = v_overlap_fraction.empty() ? ptr->get_last_overlap_fraction() : v_overlap_fraction.front();
+            diag["switchPeakVoltage"] = v_switch_peak_voltage.empty() ? ptr->get_last_switch_peak_voltage() : v_switch_peak_voltage.front();
+            diag["switchPeakCurrent"] = v_switch_peak_current.empty() ? ptr->get_last_switch_peak_current() : v_switch_peak_current.front();
+            diag["diodePeakReverseVoltage"] = v_diode_peak_reverse_voltage.empty() ? ptr->get_last_diode_peak_reverse_voltage() : v_diode_peak_reverse_voltage.front();
+            diag["diodePeakCurrent"] = v_diode_peak_current.empty() ? ptr->get_last_diode_peak_current() : v_diode_peak_current.front();
+            diag["energyRecoveryAvgCurrent"] = v_energy_recovery_avg_current.empty() ? ptr->get_last_energy_recovery_avg_current() : v_energy_recovery_avg_current.front();
+            diag["inputInductorAverage"] = v_input_inductor_average.empty() ? ptr->get_last_input_inductor_average() : v_input_inductor_average.front();
+            diag["inputInductorRipple"] = v_input_inductor_ripple.empty() ? ptr->get_last_input_inductor_ripple() : v_input_inductor_ripple.front();
+            diag["magnetizingRipple"] = v_magnetizing_ripple.empty() ? ptr->get_last_magnetizing_ripple() : v_magnetizing_ripple.front();
+            diag["fluxImbalanceMargin"] = v_flux_imbalance_margin.empty() ? ptr->get_last_flux_imbalance_margin() : v_flux_imbalance_margin.front();
+            diag["rhpZeroFrequency"] = v_rhp_zero_frequency.empty() ? ptr->get_last_rhp_zero_frequency() : v_rhp_zero_frequency.front();
+            diag["isCcm"] = v_is_ccm.empty() ? ptr->get_last_is_ccm() : (bool)v_is_ccm.front();
+            diag["sizedCo"] = v_sized_co.empty() ? ptr->get_last_sized_co() : v_sized_co.front();
+            diag["outputVoltageRipple"] = v_output_voltage_ripple.empty() ? ptr->get_last_output_voltage_ripple() : v_output_voltage_ripple.front();
+            json perOp = json::array();
+            for (size_t i = 0; i < v_duty_cycle.size(); ++i) {
+                json row;
+                row["operatingPointName"] = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["dutyCycle"] = v_duty_cycle[i]; row["conversionRatio"] = v_conversion_ratio[i];
+                row["operatingRegime"] = v_operating_regime[i]; row["overlapFraction"] = v_overlap_fraction[i];
+                row["switchPeakVoltage"] = v_switch_peak_voltage[i]; row["switchPeakCurrent"] = v_switch_peak_current[i];
+                row["diodePeakReverseVoltage"] = v_diode_peak_reverse_voltage[i]; row["diodePeakCurrent"] = v_diode_peak_current[i];
+                row["energyRecoveryAvgCurrent"] = v_energy_recovery_avg_current[i];
+                row["inputInductorAverage"] = v_input_inductor_average[i]; row["inputInductorRipple"] = v_input_inductor_ripple[i];
+                row["magnetizingRipple"] = v_magnetizing_ripple[i]; row["fluxImbalanceMargin"] = v_flux_imbalance_margin[i];
+                row["rhpZeroFrequency"] = v_rhp_zero_frequency[i]; row["isCcm"] = (bool)v_is_ccm[i];
+                row["sizedCo"] = v_sized_co[i]; row["outputVoltageRipple"] = v_output_voltage_ripple[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+            result["weinbergDiagnostics"] = diag;
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_weinberg_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// ------ LLC (special: not Advanced, just Llc with optional user overrides) ------
+json simulate_llc_ideal_waveforms(json inputsJson) {
+    try {
+        OpenMagnetics::Llc llcInputs(inputsJson);
+        if (inputsJson.contains("desiredResonantInductance") && inputsJson["desiredResonantInductance"].is_number())
+            llcInputs.set_user_resonant_inductance(inputsJson["desiredResonantInductance"].get<double>());
+        if (inputsJson.contains("desiredResonantCapacitance") && inputsJson["desiredResonantCapacitance"].is_number())
+            llcInputs.set_user_resonant_capacitance(inputsJson["desiredResonantCapacitance"].get<double>());
+
+        auto designRequirements = llcInputs.process_design_requirements();
+        double magnetizingInductance = inputsJson.value("magnetizingInductance", 200e-6);
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 3);
+        llcInputs.set_num_periods_to_extract(static_cast<int>(numberOfPeriods));
+        llcInputs.set_num_steady_state_periods(static_cast<int>(numberOfSteadyStatePeriods));
+        auto topologyWaveforms = llcInputs.simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance, numberOfPeriods);
+        auto operatingPoints = llcInputs.simulate_and_extract_operating_points(turnsRatios, magnetizingInductance, numberOfPeriods);
+        json result;
+        json inputsJ;
+        inputsJ["designRequirements"] = json();
+        to_json(inputsJ["designRequirements"], designRequirements);
+        inputsJ["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputsJ["operatingPoints"].push_back(j); }
+        result["inputs"] = inputsJ;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        json diag;
+        diag["computedResonantInductance"]  = llcInputs.get_computed_resonant_inductance();
+        diag["computedResonantCapacitance"] = llcInputs.get_computed_resonant_capacitance();
+        diag["computedInductanceRatio"]     = llcInputs.get_computed_inductance_ratio();
+        diag["lipFrequency"]                = llcInputs.get_lip_frequency();
+        diag["lipInputVoltage"]             = llcInputs.get_lip_input_voltage();
+        diag["lastSubStateSequence"]        = llcInputs.get_last_sub_state_sequence();
+        {
+            const auto& names = llcInputs.get_per_op_name();
+            const auto& mode  = llcInputs.get_per_op_mode();
+            const auto& res   = llcInputs.get_per_op_steady_state_residual();
+            const auto& zvs   = llcInputs.get_per_op_zvs_margin_lagging();
+            const auto& ipk   = llcInputs.get_per_op_primary_peak_current();
+            diag["lastMode"]                = mode.empty() ? llcInputs.get_last_mode()                  : mode.front();
+            diag["lastSteadyStateResidual"] = res.empty()  ? llcInputs.get_last_steady_state_residual() : res.front();
+            diag["lastZvsMarginLagging"]    = zvs.empty()  ? llcInputs.get_last_zvs_margin_lagging()    : zvs.front();
+            diag["lastPrimaryPeakCurrent"]  = ipk.empty()  ? llcInputs.get_last_primary_peak_current()  : ipk.front();
+            json perOp = json::array();
+            for (size_t i = 0; i < mode.size(); ++i) {
+                json row;
+                row["operatingPointName"]    = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["lastMode"]              = mode[i];
+                row["steadyStateResidual"]   = res[i];
+                row["zvsMarginLagging"]      = zvs[i];
+                row["primaryPeakCurrent"]    = ipk[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+        }
+        result["llcDiagnostics"] = diag;
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_llc_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// ------ CLLC ------
+json simulate_cllc_ideal_waveforms(json inputsJson) {
+    try {
+        OpenMagnetics::CllcConverter cllc(inputsJson);
+        auto designRequirements = cllc.process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        if (turnsRatios.empty()) throw std::runtime_error("CLLC: no turns ratios");
+        double magnetizingInductance;
+        if (inputsJson.contains("magnetizingInductance") && inputsJson["magnetizingInductance"].is_number())
+            magnetizingInductance = inputsJson["magnetizingInductance"].get<double>();
+        else {
+            magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(magnetizingInductance > 0)) throw std::runtime_error("CLLC: no magnetizing inductance");
+        }
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 3);
+        cllc.set_num_periods_to_extract(static_cast<int>(numberOfPeriods));
+        cllc.set_num_steady_state_periods(static_cast<int>(numberOfSteadyStatePeriods));
+        auto topologyWaveforms = cllc.simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance, numberOfPeriods);
+        auto operatingPoints = cllc.simulate_and_extract_operating_points(turnsRatios, magnetizingInductance);
+        cllc.process_operating_points(turnsRatios, magnetizingInductance);
+        json result;
+        json inputsJ;
+        inputsJ["designRequirements"] = json();
+        to_json(inputsJ["designRequirements"], designRequirements);
+        inputsJ["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputsJ["operatingPoints"].push_back(j); }
+        result["inputs"] = inputsJ;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        json diag;
+        diag["lipFrequency"]              = cllc.get_lip_frequency();
+        diag["lastSubStateSequence"]      = cllc.get_last_sub_state_sequence();
+        diag["bridgeVoltageFactor"]       = cllc.get_bridge_voltage_factor();
+        {
+            const auto& names = cllc.get_per_op_name();
+            const auto& mode  = cllc.get_per_op_mode();
+            const auto& res   = cllc.get_per_op_steady_state_residual();
+            const auto& zp    = cllc.get_per_op_zvs_margin_primary();
+            const auto& zs    = cllc.get_per_op_zvs_margin_secondary();
+            const auto& rtt   = cllc.get_per_op_resonant_transition_time();
+            const auto& ipk   = cllc.get_per_op_primary_peak_current();
+            const auto& vcr   = cllc.get_per_op_resonant_cap_peak_voltage();
+            diag["lastMode"]                  = mode.empty() ? cllc.get_last_mode()                      : mode.front();
+            diag["lastSteadyStateResidual"]   = res.empty()  ? cllc.get_last_steady_state_residual()     : res.front();
+            diag["lastZvsMarginPrimary"]      = zp.empty()   ? cllc.get_last_zvs_margin_primary()        : zp.front();
+            diag["lastZvsMarginSecondary"]    = zs.empty()   ? cllc.get_last_zvs_margin_secondary()      : zs.front();
+            diag["lastResonantTransitionTime"]= rtt.empty()  ? cllc.get_last_resonant_transition_time()  : rtt.front();
+            diag["lastPrimaryPeakCurrent"]    = ipk.empty()  ? cllc.get_last_primary_peak_current()      : ipk.front();
+            diag["lastResonantCapPeakVoltage"]= vcr.empty()  ? cllc.get_last_resonant_cap_peak_voltage() : vcr.front();
+            json perOp = json::array();
+            for (size_t i = 0; i < mode.size(); ++i) {
+                json row;
+                row["operatingPointName"]     = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["lastMode"]               = mode[i]; row["steadyStateResidual"] = res[i];
+                row["zvsMarginPrimary"]       = zp[i]; row["zvsMarginSecondary"] = zs[i];
+                row["resonantTransitionTime"] = rtt[i]; row["primaryPeakCurrent"] = ipk[i];
+                row["resonantCapPeakVoltage"] = vcr[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+        }
+        result["cllcDiagnostics"] = diag;
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_cllc_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// ------ CLLLC ------
+json simulate_clllc_ideal_waveforms(json inputsJson) {
+    try {
+        OpenMagnetics::Clllc model(inputsJson);
+        auto designRequirements = model.process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        if (turnsRatios.empty()) throw std::runtime_error("Clllc: no turns ratios");
+        double magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(magnetizingInductance > 0)) throw std::runtime_error("Clllc: no magnetizing inductance");
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5);
+        model.set_num_periods_to_extract(static_cast<int>(numberOfPeriods));
+        model.set_num_steady_state_periods(static_cast<int>(numberOfSteadyStatePeriods));
+        auto operatingPoints = model.simulate_and_extract_operating_points(turnsRatios, magnetizingInductance);
+        auto topologyWaveforms = model.simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance, numberOfPeriods);
+        json result;
+        json inputs;
+        inputs["designRequirements"] = json();
+        to_json(inputs["designRequirements"], designRequirements);
+        inputs["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); }
+        result["inputs"] = inputs;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        model.process();
+        {
+            json diag;
+            diag["computedPrimarySeriesInductance"]      = model.get_computed_primary_series_inductance();
+            diag["computedSecondarySeriesInductance"]    = model.get_computed_secondary_series_inductance();
+            diag["computedPrimaryResonantCapacitance"]   = model.get_computed_primary_resonant_capacitance();
+            diag["computedSecondaryResonantCapacitance"] = model.get_computed_secondary_resonant_capacitance();
+            diag["computedMagnetizingInductance"]        = model.get_computed_magnetizing_inductance();
+            diag["computedTurnsRatio"]                   = model.get_computed_turns_ratio();
+            diag["computedDeadTime"]                     = model.get_computed_dead_time();
+            diag["computedInductanceRatioK"]             = model.get_computed_inductance_ratio_k();
+            diag["computedQualityFactor"]                = model.get_computed_quality_factor();
+            diag["computedPrimaryResonantFrequency"]     = model.get_computed_primary_resonant_frequency();
+            const auto& names = model.get_per_op_name();
+            const auto& mf    = model.get_per_op_mode_forward();
+            const auto& mr    = model.get_per_op_mode_reverse();
+            const auto& zpl   = model.get_per_op_zvs_margin_primary_lagging();
+            const auto& zsl   = model.get_per_op_zvs_margin_secondary_lagging();
+            const auto& zltp  = model.get_per_op_zvs_load_threshold_primary();
+            const auto& zlts  = model.get_per_op_zvs_load_threshold_secondary();
+            const auto& rtt   = model.get_per_op_resonant_transition_time();
+            const auto& ipk   = model.get_per_op_primary_peak_current();
+            const auto& spk   = model.get_per_op_secondary_peak_current();
+            const auto& irms  = model.get_per_op_primary_rms_current();
+            const auto& srms  = model.get_per_op_secondary_rms_current();
+            const auto& mpk   = model.get_per_op_magnetizing_peak_current();
+            const auto& vc1   = model.get_per_op_cr1_peak_voltage();
+            const auto& vc2   = model.get_per_op_cr2_peak_voltage();
+            const auto& shr   = model.get_per_op_current_sharing_ratio();
+            const auto& res   = model.get_per_op_steady_state_residual();
+            diag["lastModeForward"]                = mf.empty()   ? model.get_last_mode_forward()                  : mf.front();
+            diag["lastModeReverse"]                = mr.empty()   ? model.get_last_mode_reverse()                  : mr.front();
+            diag["lastZvsMarginPrimaryLagging"]    = zpl.empty()  ? model.get_last_zvs_margin_primary_lagging()    : zpl.front();
+            diag["lastZvsMarginSecondaryLagging"]  = zsl.empty()  ? model.get_last_zvs_margin_secondary_lagging()  : zsl.front();
+            diag["lastZvsLoadThresholdPrimary"]    = zltp.empty() ? model.get_last_zvs_load_threshold_primary()    : zltp.front();
+            diag["lastZvsLoadThresholdSecondary"]  = zlts.empty() ? model.get_last_zvs_load_threshold_secondary()  : zlts.front();
+            diag["lastResonantTransitionTime"]     = rtt.empty()  ? model.get_last_resonant_transition_time()      : rtt.front();
+            diag["lastPrimaryPeakCurrent"]         = ipk.empty()  ? model.get_last_primary_peak_current()          : ipk.front();
+            diag["lastSecondaryPeakCurrent"]       = spk.empty()  ? model.get_last_secondary_peak_current()        : spk.front();
+            diag["lastPrimaryRmsCurrent"]          = irms.empty() ? model.get_last_primary_rms_current()           : irms.front();
+            diag["lastSecondaryRmsCurrent"]        = srms.empty() ? model.get_last_secondary_rms_current()         : srms.front();
+            diag["lastMagnetizingPeakCurrent"]     = mpk.empty()  ? model.get_last_magnetizing_peak_current()      : mpk.front();
+            diag["lastCr1PeakVoltage"]             = vc1.empty()  ? model.get_last_cr1_peak_voltage()              : vc1.front();
+            diag["lastCr2PeakVoltage"]             = vc2.empty()  ? model.get_last_cr2_peak_voltage()              : vc2.front();
+            diag["lastCurrentSharingRatio"]        = shr.empty()  ? model.get_last_current_sharing_ratio()         : shr.front();
+            diag["lastSteadyStateResidual"]        = res.empty()  ? model.get_last_steady_state_residual()         : res.front();
+            json perOp = json::array();
+            for (size_t i = 0; i < mf.size(); ++i) {
+                json row;
+                row["operatingPointName"]              = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["modeForward"] = mf[i]; row["modeReverse"] = mr[i];
+                row["zvsMarginPrimaryLagging"] = zpl[i]; row["zvsMarginSecondaryLagging"] = zsl[i];
+                row["zvsLoadThresholdPrimary"] = zltp[i]; row["zvsLoadThresholdSecondary"] = zlts[i];
+                row["resonantTransitionTime"] = rtt[i]; row["primaryPeakCurrent"] = ipk[i];
+                row["secondaryPeakCurrent"] = spk[i]; row["primaryRmsCurrent"] = irms[i];
+                row["secondaryRmsCurrent"] = srms[i]; row["magnetizingPeakCurrent"] = mpk[i];
+                row["cr1PeakVoltage"] = vc1[i]; row["cr2PeakVoltage"] = vc2[i];
+                row["currentSharingRatio"] = shr[i]; row["steadyStateResidual"] = res[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+            result["clllcDiagnostics"] = diag;
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_clllc_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// ------ SRC ------
+json simulate_src_ideal_waveforms(json inputsJson) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredTurnsRatios") ||
+                          inputsJson.contains("desiredResonantInductance") ||
+                          inputsJson.contains("desiredResonantCapacitance");
+        std::unique_ptr<OpenMagnetics::Src> model;
+        if (isAdvanced) model = std::make_unique<OpenMagnetics::AdvancedSrc>(inputsJson);
+        else model = std::make_unique<OpenMagnetics::Src>(inputsJson);
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 5);
+        model->set_num_periods_to_extract(static_cast<int>(numberOfPeriods));
+        model->set_num_steady_state_periods(static_cast<int>(numberOfSteadyStatePeriods));
+        auto designRequirements = model->process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        if (turnsRatios.empty()) throw std::runtime_error("SRC: no turns ratios");
+        double magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(magnetizingInductance > 0)) throw std::runtime_error("SRC: no magnetizing inductance");
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        auto topologyWaveforms = model->simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance, numberOfPeriods);
+        auto operatingPoints = model->simulate_and_extract_operating_points(turnsRatios, magnetizingInductance, numberOfPeriods);
+        json result;
+        json inputsJ;
+        inputsJ["designRequirements"] = json();
+        to_json(inputsJ["designRequirements"], designRequirements);
+        inputsJ["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputsJ["operatingPoints"].push_back(j); }
+        result["inputs"] = inputsJ;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        json diag;
+        diag["computedResonantInductance"]  = model->get_computed_resonant_inductance();
+        diag["computedResonantCapacitance"] = model->get_computed_resonant_capacitance();
+        diag["computedResonantFrequency"]   = model->get_computed_resonant_frequency();
+        {
+            const auto& names = model->get_per_op_name();
+            const auto& gm    = model->get_per_op_gain_m();
+            const auto& nfsw  = model->get_per_op_normalized_fsw();
+            const auto& ir    = model->get_per_op_ir_peak();
+            const auto& vc    = model->get_per_op_vcr_peak();
+            const auto& abv   = model->get_per_op_is_above_resonance();
+            diag["lastGainM"]            = gm.empty()   ? model->get_last_gain()               : gm.front();
+            diag["lastNormalizedFsw"]    = nfsw.empty() ? model->get_last_normalized_fsw()     : nfsw.front();
+            diag["lastIrPeak"]           = ir.empty()   ? model->get_last_ir_peak()            : ir.front();
+            diag["lastVcrPeak"]          = vc.empty()   ? model->get_last_vcr_peak()           : vc.front();
+            diag["lastIsAboveResonance"] = abv.empty()  ? model->get_last_is_above_resonance() : (abv.front() != 0);
+            json perOp = json::array();
+            for (size_t i = 0; i < gm.size(); ++i) {
+                json row;
+                row["operatingPointName"] = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["gainM"] = gm[i]; row["normalizedFsw"] = nfsw[i]; row["irPeak"] = ir[i];
+                row["vcrPeak"] = vc[i]; row["isAboveResonance"] = (abv[i] != 0);
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+        }
+        result["srcDiagnostics"] = diag;
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_src_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// ------ DAB (always AdvancedDab) ------
+json simulate_dab_ideal_waveforms(json inputsJson) {
+    try {
+        OpenMagnetics::AdvancedDab dabInputs(inputsJson);
+        auto inputs = dabInputs.process();
+        auto designRequirements = inputs.get_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        double magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(magnetizingInductance > 0)) throw std::runtime_error("DAB: no magnetizing inductance");
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 3);
+        dabInputs.set_num_periods_to_extract(static_cast<int>(numberOfPeriods));
+        dabInputs.set_num_steady_state_periods(static_cast<int>(numberOfSteadyStatePeriods));
+        auto topologyWaveforms = dabInputs.simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance, numberOfPeriods);
+        auto operatingPoints = dabInputs.simulate_and_extract_operating_points(turnsRatios, magnetizingInductance);
+        json result;
+        json inputsJ;
+        inputsJ["designRequirements"] = json();
+        to_json(inputsJ["designRequirements"], designRequirements);
+        inputsJ["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputsJ["operatingPoints"].push_back(j); }
+        result["inputs"] = inputsJ;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        {
+            json dabDiag;
+            const auto& names = dabInputs.get_per_op_name();
+            const auto& mt    = dabInputs.get_per_op_modulation_type();
+            const auto& zp    = dabInputs.get_per_op_zvs_margin_primary();
+            const auto& zs    = dabInputs.get_per_op_zvs_margin_secondary();
+            const auto& d3    = dabInputs.get_per_op_d3_rad();
+            const auto& vr    = dabInputs.get_per_op_voltage_conversion_ratio();
+            dabDiag["modulationType"]           = mt.empty() ? dabInputs.get_last_modulation_type()       : mt.front();
+            dabDiag["computedD3Deg"]            = (d3.empty() ? dabInputs.get_last_d3_rad()               : d3.front()) * 180.0 / M_PI;
+            dabDiag["zvsMarginPrimaryDeg"]      = (zp.empty() ? dabInputs.get_last_zvs_margin_primary()   : zp.front()) * 180.0 / M_PI;
+            dabDiag["zvsMarginSecondaryDeg"]    = (zs.empty() ? dabInputs.get_last_zvs_margin_secondary() : zs.front()) * 180.0 / M_PI;
+            dabDiag["computedSeriesInductance"] = dabInputs.get_computed_series_inductance();
+            dabDiag["voltageConversionRatio"]   = vr.empty() ? dabInputs.get_last_voltage_conversion_ratio() : vr.front();
+            json perOp = json::array();
+            for (size_t i = 0; i < mt.size(); ++i) {
+                json row;
+                row["operatingPointName"]    = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["modulationType"]        = mt[i]; row["zvsMarginPrimaryDeg"] = zp[i] * 180.0 / M_PI;
+                row["zvsMarginSecondaryDeg"] = zs[i] * 180.0 / M_PI; row["computedD3Deg"] = d3[i] * 180.0 / M_PI;
+                row["voltageConversionRatio"]= vr[i];
+                perOp.push_back(row);
+            }
+            dabDiag["perOp"] = perOp;
+            result["dabDiagnostics"] = dabDiag;
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_dab_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// ------ PSFB / PSHB (always AdvancedPsfb/AdvancedPshb, same diagnostic schema) ------
+#define DEFINE_SIMULATE_PHASE_SHIFTED(func_name, AdvancedType, diagKey) \
+json func_name(json inputsJson) { \
+    try { \
+        AdvancedType model(inputsJson); \
+        auto inputs = model.process(); \
+        auto designRequirements = inputs.get_design_requirements(); \
+        std::vector<double> turnsRatios; \
+        for (const auto& tr : designRequirements.get_turns_ratios()) { \
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value()); \
+        } \
+        double magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance()); \
+        if (!(magnetizingInductance > 0)) throw std::runtime_error(std::string(#func_name) + ": no magnetizing inductance"); \
+        OpenMagnetics::NgspiceRunner runner; \
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available"); \
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2); \
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 3); \
+        model.set_num_periods_to_extract(static_cast<int>(numberOfPeriods)); \
+        model.set_num_steady_state_periods(static_cast<int>(numberOfSteadyStatePeriods)); \
+        auto topologyWaveforms = model.simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance, numberOfPeriods); \
+        auto operatingPoints = model.simulate_and_extract_operating_points(turnsRatios, magnetizingInductance); \
+        json result; \
+        json inputsJ; \
+        inputsJ["designRequirements"] = json(); \
+        to_json(inputsJ["designRequirements"], designRequirements); \
+        inputsJ["operatingPoints"] = json::array(); \
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputsJ["operatingPoints"].push_back(j); } \
+        result["inputs"] = inputsJ; \
+        result["converterWaveforms"] = json::array(); \
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); } \
+        { \
+            json diag; \
+            const auto& names = model.get_per_op_name(); \
+            const auto& dcl   = model.get_per_op_duty_cycle_loss(); \
+            const auto& deff  = model.get_per_op_effective_duty_cycle(); \
+            const auto& zvs   = model.get_per_op_zvs_margin_lagging(); \
+            const auto& zlt   = model.get_per_op_zvs_load_threshold(); \
+            const auto& rtt   = model.get_per_op_resonant_transition_time(); \
+            const auto& ipk   = model.get_per_op_primary_peak_current(); \
+            diag["effectiveDutyCycle"]            = deff.empty() ? model.get_last_effective_duty_cycle()     : deff.front(); \
+            diag["dutyCycleLoss"]                 = dcl.empty()  ? model.get_last_duty_cycle_loss()          : dcl.front(); \
+            diag["zvsMarginLagging"]              = zvs.empty()  ? model.get_last_zvs_margin_lagging()       : zvs.front(); \
+            diag["zvsLoadThreshold"]              = zlt.empty()  ? model.get_last_zvs_load_threshold()       : zlt.front(); \
+            diag["resonantTransitionTime"]        = rtt.empty()  ? model.get_last_resonant_transition_time() : rtt.front(); \
+            diag["primaryPeakCurrent"]            = ipk.empty()  ? model.get_last_primary_peak_current()     : ipk.front(); \
+            diag["computedSeriesInductance"]      = model.get_computed_series_inductance(); \
+            diag["computedOutputInductance"]      = model.get_computed_output_inductance(); \
+            diag["computedMagnetizingInductance"] = model.get_computed_magnetizing_inductance(); \
+            diag["computedDeadTime"]              = model.get_computed_dead_time(); \
+            json perOp = json::array(); \
+            for (size_t i = 0; i < dcl.size(); ++i) { \
+                json row; \
+                row["operatingPointName"]    = (i < names.size()) ? names[i] : ("OP " + std::to_string(i)); \
+                row["dutyCycleLoss"] = dcl[i]; row["effectiveDutyCycle"] = deff[i]; \
+                row["zvsMarginLagging"] = zvs[i]; row["zvsLoadThreshold"] = zlt[i]; \
+                row["resonantTransitionTime"] = rtt[i]; row["primaryPeakCurrent"] = ipk[i]; \
+                perOp.push_back(row); \
+            } \
+            diag["perOp"] = perOp; \
+            result[diagKey] = diag; \
+        } \
+        return result; \
+    } \
+    catch (const std::exception& exc) { \
+        return json{{"error", std::string(#func_name ": ") + exc.what()}}; \
+    } \
+}
+
+DEFINE_SIMULATE_PHASE_SHIFTED(simulate_psfb_ideal_waveforms, OpenMagnetics::AdvancedPsfb, "psfbDiagnostics")
+DEFINE_SIMULATE_PHASE_SHIFTED(simulate_pshb_ideal_waveforms, OpenMagnetics::AdvancedPshb, "pshbDiagnostics")
+#undef DEFINE_SIMULATE_PHASE_SHIFTED
+
+// ------ AHB (always AdvancedAsymmetricHalfBridge) ------
+json simulate_ahb_ideal_waveforms(json inputsJson) {
+    try {
+        OpenMagnetics::AdvancedAsymmetricHalfBridge ahbInputs(inputsJson);
+        auto inputs = ahbInputs.process();
+        auto designRequirements = inputs.get_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        double magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(magnetizingInductance > 0)) throw std::runtime_error("AHB: no magnetizing inductance");
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 2);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 3);
+        ahbInputs.set_num_periods_to_extract(static_cast<int>(numberOfPeriods));
+        ahbInputs.set_num_steady_state_periods(static_cast<int>(numberOfSteadyStatePeriods));
+        auto topologyWaveforms = ahbInputs.simulate_and_extract_topology_waveforms(turnsRatios, magnetizingInductance, numberOfPeriods);
+        auto operatingPoints = ahbInputs.simulate_and_extract_operating_points(turnsRatios, magnetizingInductance);
+        json result;
+        json inputsJ;
+        inputsJ["designRequirements"] = json();
+        to_json(inputsJ["designRequirements"], designRequirements);
+        inputsJ["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputsJ["operatingPoints"].push_back(j); }
+        result["inputs"] = inputsJ;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        {
+            json diag;
+            const auto& names = ahbInputs.get_per_op_name();
+            const auto& dc    = ahbInputs.get_per_op_duty_cycle();
+            const auto& cr    = ahbInputs.get_per_op_conversion_ratio();
+            const auto& cbv   = ahbInputs.get_per_op_dc_blocking_cap_voltage();
+            const auto& cbr   = ahbInputs.get_per_op_dc_blocking_cap_ripple();
+            const auto& ppvp  = ahbInputs.get_per_op_primary_peak_voltage_positive();
+            const auto& ppvn  = ahbInputs.get_per_op_primary_peak_voltage_negative();
+            const auto& spvq1 = ahbInputs.get_per_op_switch_peak_voltage_q1();
+            const auto& spvq2 = ahbInputs.get_per_op_switch_peak_voltage_q2();
+            const auto& sirq1 = ahbInputs.get_per_op_switch_rms_current_q1();
+            const auto& sirq2 = ahbInputs.get_per_op_switch_rms_current_q2();
+            const auto& zm    = ahbInputs.get_per_op_zvs_margin();
+            const auto& rtt   = ahbInputs.get_per_op_resonant_transition_time();
+            const auto& ssfe  = ahbInputs.get_per_op_steady_state_flux_excursion();
+            const auto& tfee  = ahbInputs.get_per_op_transient_flux_excursion_estimate();
+            const auto& mcr   = ahbInputs.get_per_op_magnetizing_current_ripple();
+            const auto& oir   = ahbInputs.get_per_op_output_inductor_ripple();
+            const auto& om    = ahbInputs.get_per_op_operating_mode();
+            const auto& rt    = ahbInputs.get_per_op_rectifier_type();
+            diag["operatingMode"]                = om.empty()    ? ahbInputs.get_last_operating_mode()                     : om.front();
+            diag["rectifierType"]                = rt.empty()    ? ahbInputs.get_last_rectifier_type()                     : rt.front();
+            diag["dutyCycle"]                    = dc.empty()    ? ahbInputs.get_last_duty_cycle()                         : dc.front();
+            diag["conversionRatio"]              = cr.empty()    ? ahbInputs.get_last_conversion_ratio()                   : cr.front();
+            diag["dcBlockingCapVoltage"]         = cbv.empty()   ? ahbInputs.get_last_dc_blocking_cap_voltage()             : cbv.front();
+            diag["dcBlockingCapRipple"]          = cbr.empty()   ? ahbInputs.get_last_dc_blocking_cap_ripple()              : cbr.front();
+            diag["primaryPeakVoltagePositive"]   = ppvp.empty()  ? ahbInputs.get_last_primary_peak_voltage_positive()       : ppvp.front();
+            diag["primaryPeakVoltageNegative"]   = ppvn.empty()  ? ahbInputs.get_last_primary_peak_voltage_negative()       : ppvn.front();
+            diag["switchPeakVoltageQ1"]          = spvq1.empty() ? ahbInputs.get_last_switch_peak_voltage_q1()              : spvq1.front();
+            diag["switchPeakVoltageQ2"]          = spvq2.empty() ? ahbInputs.get_last_switch_peak_voltage_q2()              : spvq2.front();
+            diag["switchRmsCurrentQ1"]           = sirq1.empty() ? ahbInputs.get_last_switch_rms_current_q1()               : sirq1.front();
+            diag["switchRmsCurrentQ2"]           = sirq2.empty() ? ahbInputs.get_last_switch_rms_current_q2()               : sirq2.front();
+            diag["zvsMargin"]                    = zm.empty()    ? ahbInputs.get_last_zvs_margin()                          : zm.front();
+            diag["resonantTransitionTime"]       = rtt.empty()   ? ahbInputs.get_last_resonant_transition_time()            : rtt.front();
+            diag["steadyStateFluxExcursion"]     = ssfe.empty()  ? ahbInputs.get_last_steady_state_flux_excursion()         : ssfe.front();
+            diag["transientFluxExcursionEstimate"] = tfee.empty() ? ahbInputs.get_last_transient_flux_excursion_estimate()  : tfee.front();
+            diag["magnetizingCurrentRipple"]     = mcr.empty()   ? ahbInputs.get_last_magnetizing_current_ripple()          : mcr.front();
+            diag["outputInductorRipple"]         = oir.empty()   ? ahbInputs.get_last_output_inductor_ripple()              : oir.front();
+            json perOp = json::array();
+            for (size_t i = 0; i < dc.size(); ++i) {
+                json row;
+                row["operatingPointName"]            = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["dutyCycle"] = dc[i]; row["conversionRatio"] = cr[i];
+                row["dcBlockingCapVoltage"] = cbv[i]; row["dcBlockingCapRipple"] = cbr[i];
+                row["primaryPeakVoltagePositive"] = ppvp[i]; row["primaryPeakVoltageNegative"] = ppvn[i];
+                row["switchPeakVoltageQ1"] = spvq1[i]; row["switchPeakVoltageQ2"] = spvq2[i];
+                row["switchRmsCurrentQ1"] = sirq1[i]; row["switchRmsCurrentQ2"] = sirq2[i];
+                row["zvsMargin"] = zm[i]; row["resonantTransitionTime"] = rtt[i];
+                row["steadyStateFluxExcursion"] = ssfe[i]; row["transientFluxExcursionEstimate"] = tfee[i];
+                row["magnetizingCurrentRipple"] = mcr[i]; row["outputInductorRipple"] = oir[i];
+                row["operatingMode"] = om[i]; row["rectifierType"] = rt[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+            result["ahbDiagnostics"] = diag;
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_ahb_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// ------ Vienna ------
+json simulate_vienna_ideal_waveforms(json inputsJson) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredBoostInductance");
+        std::unique_ptr<OpenMagnetics::Vienna> model;
+        if (isAdvanced) model = std::make_unique<OpenMagnetics::AdvancedVienna>(inputsJson);
+        else model = std::make_unique<OpenMagnetics::Vienna>(inputsJson);
+        size_t numberOfPeriods = inputsJson.value("numberOfPeriods", 1);
+        size_t numberOfSteadyStatePeriods = inputsJson.value("numberOfSteadyStatePeriods", 3);
+        model->set_num_periods_to_extract(static_cast<int>(numberOfPeriods));
+        model->set_num_steady_state_periods(static_cast<int>(numberOfSteadyStatePeriods));
+        auto designRequirements = model->process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        double boostInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(boostInductance > 0)) throw std::runtime_error("Vienna: no boost inductance");
+        OpenMagnetics::NgspiceRunner runner;
+        if (!runner.is_available()) throw std::runtime_error("ngspice is not available");
+        auto topologyWaveforms = model->simulate_and_extract_topology_waveforms(turnsRatios, boostInductance, numberOfPeriods);
+        auto operatingPoints = model->simulate_and_extract_operating_points(turnsRatios, boostInductance, numberOfPeriods);
+        json result;
+        json inputsJ;
+        inputsJ["designRequirements"] = json();
+        to_json(inputsJ["designRequirements"], designRequirements);
+        inputsJ["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputsJ["operatingPoints"].push_back(j); }
+        result["inputs"] = inputsJ;
+        result["converterWaveforms"] = json::array();
+        for (const auto& tw : topologyWaveforms) { json j; to_json(j, tw); result["converterWaveforms"].push_back(j); }
+        json diag;
+        diag["computedBoostInductance"]      = model->get_computed_boost_inductance();
+        diag["computedModulationIndex"]      = model->get_computed_modulation_index();
+        diag["computedLinePeakCurrent"]      = model->get_computed_line_peak_current();
+        diag["computedSwitchVoltageStress"]  = model->get_computed_switch_voltage_stress();
+        result["viennaDiagnostics"] = diag;
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_vienna_ideal_waveforms: ") + exc.what()}};
+    }
+}
+
+// ------ PFC ------
+json simulate_pfc_waveforms(json inputsJson) {
+    try {
+        OpenMagnetics::PowerFactorCorrection pfcInputs(inputsJson);
+        double inductance;
+        if (inputsJson.contains("inductance")) {
+            inductance = inputsJson["inductance"].get<double>();
+        } else {
+            std::string mode = inputsJson.value("mode", "Continuous Conduction Mode");
+            if (mode == "Continuous Conduction Mode") inductance = pfcInputs.calculate_inductance_ccm();
+            else if (mode == "Critical Conduction Mode") inductance = pfcInputs.calculate_inductance_crcm();
+            else inductance = pfcInputs.calculate_inductance_dcm();
+        }
+        auto designRequirements = pfcInputs.process_design_requirements();
+        double dcResistance = inputsJson.value("dcResistance", 0.1);
+        int numberOfCycles = inputsJson.value("numberOfPeriods", 2);
+        pfcInputs.set_num_periods_to_extract(numberOfCycles);
+        auto simWaveforms = pfcInputs.simulate_and_extract_waveforms(inductance, dcResistance, numberOfCycles);
+        auto operatingPoints = pfcInputs.simulate_and_extract_operating_points(inductance, dcResistance);
+        json result;
+        result["inductance"] = inductance;
+        json inputs;
+        inputs["designRequirements"] = json();
+        to_json(inputs["designRequirements"], designRequirements);
+        inputs["operatingPoints"] = json::array();
+        for (const auto& op : operatingPoints) { json j; to_json(j, op); inputs["operatingPoints"].push_back(j); }
+        result["inputs"] = inputs;
+        result["converterWaveforms"] = json::array();
+        json convOp;
+        convOp["operatingPointName"] = simWaveforms.operatingPointName;
+        convOp["switchingFrequency"] = simWaveforms.switchingFrequency;
+        if (!simWaveforms.inputVoltage.empty()) {
+            json iv; iv["time"] = simWaveforms.time; iv["data"] = simWaveforms.inputVoltage;
+            convOp["inputVoltage"] = iv;
+        }
+        if (!simWaveforms.inputCurrent.empty()) {
+            json ic; ic["time"] = simWaveforms.time; ic["data"] = simWaveforms.inputCurrent;
+            convOp["inputCurrent"] = ic;
+        }
+        if (!simWaveforms.outputCurrent.empty()) {
+            json oc; oc["time"] = simWaveforms.time; oc["data"] = simWaveforms.outputCurrent;
+            convOp["outputCurrents"] = json::array({oc});
+        }
+        result["converterWaveforms"].push_back(convOp);
+        result["powerFactor"] = simWaveforms.powerFactor;
+        result["efficiency"] = simWaveforms.efficiency;
+        result["currentThd"] = simWaveforms.currentThd;
+        pfcInputs.process();
+        {
+            json diag;
+            diag["computedInductance"] = pfcInputs.get_computed_inductance();
+            diag["actualMode"]         = pfcInputs.get_computed_actual_mode();
+            const auto& names = pfcInputs.get_per_op_name();
+            const auto& dc    = pfcInputs.get_per_op_duty_cycle_peak();
+            const auto& ipk   = pfcInputs.get_per_op_peak_inductor_current();
+            const auto& ir    = pfcInputs.get_per_op_inductor_ripple();
+            const auto& irms  = pfcInputs.get_per_op_line_rms_current();
+            const auto& pin   = pfcInputs.get_per_op_input_power();
+            diag["dutyCyclePeak"]       = dc.empty()   ? pfcInputs.get_last_duty_cycle_peak()       : dc.front();
+            diag["peakInductorCurrent"] = ipk.empty()  ? pfcInputs.get_last_peak_inductor_current() : ipk.front();
+            diag["inductorRipple"]      = ir.empty()   ? pfcInputs.get_last_inductor_ripple()       : ir.front();
+            diag["lineRmsCurrent"]      = irms.empty() ? pfcInputs.get_last_line_rms_current()      : irms.front();
+            diag["inputPower"]          = pin.empty()  ? pfcInputs.get_last_input_power()           : pin.front();
+            json perOp = json::array();
+            for (size_t i = 0; i < dc.size(); ++i) {
+                json row;
+                row["operatingPointName"]  = (i < names.size()) ? names[i] : ("OP " + std::to_string(i));
+                row["dutyCyclePeak"] = dc[i]; row["peakInductorCurrent"] = ipk[i];
+                row["inductorRipple"] = ir[i]; row["lineRmsCurrent"] = irms[i]; row["inputPower"] = pin[i];
+                perOp.push_back(row);
+            }
+            diag["perOp"] = perOp;
+            result["pfcDiagnostics"] = diag;
+        }
+        return result;
+    }
+    catch (const std::exception& exc) {
+        return json{{"error", std::string("simulate_pfc_waveforms: ") + exc.what()}};
+    }
+}
+
+#undef DEFINE_SIMULATE_NON_ISOLATED
+#undef DEFINE_SIMULATE_ISOLATED
+
+// ============================================================================
+// Phase B generate_*_ngspice_circuit functions (per-topology SPICE generators).
+//
+// These are the per-topology convenience wrappers that match the WASM API.
+// They take a converter JSON + optional vin/op indices and return a raw
+// std::string netlist. The unified generate_ngspice_circuit() above already
+// dispatches all topologies; these are individual entry points for parity.
+// ============================================================================
+
+template<typename ConverterType, typename AdvancedConverterType>
+std::string generate_converter_ngspice_circuit_helper_py(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex, const std::string& desiredFieldName) {
+    try {
+        bool isAdvanced = inputsJson.contains(desiredFieldName);
+        std::vector<double> turnsRatios;
+        double magnetizingInductance;
+        std::string netlist;
+        if (isAdvanced) {
+            AdvancedConverterType converter(inputsJson);
+            magnetizingInductance = converter.get_desired_inductance();
+            turnsRatios = converter.get_desired_turns_ratios();
+            netlist = converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+        } else {
+            ConverterType converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            for (const auto& tr : designRequirements.get_turns_ratios()) {
+                turnsRatios.push_back(tr.get_nominal().value());
+            }
+            magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(magnetizingInductance > 0)) throw std::runtime_error("Unable to calculate magnetizing inductance");
+            netlist = converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_flyback_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    return generate_converter_ngspice_circuit_helper_py<OpenMagnetics::Flyback, OpenMagnetics::AdvancedFlyback>(
+        inputsJson, inputVoltageIndex, operatingPointIndex, "desiredInductance");
+}
+
+std::string generate_buck_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        double inductance;
+        std::string netlist;
+        if (isAdvanced) {
+            OpenMagnetics::AdvancedBuck converter(inputsJson);
+            inductance = converter.get_desired_inductance();
+            netlist = converter.generate_ngspice_circuit(inductance, inputVoltageIndex, operatingPointIndex);
+        } else {
+            OpenMagnetics::Buck converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            inductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductance > 0)) throw std::runtime_error("Unable to calculate inductance");
+            netlist = converter.generate_ngspice_circuit(inductance, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_boost_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        double inductance;
+        std::string netlist;
+        if (isAdvanced) {
+            OpenMagnetics::AdvancedBoost converter(inputsJson);
+            inductance = converter.get_desired_inductance();
+            netlist = converter.generate_ngspice_circuit(inductance, inputVoltageIndex, operatingPointIndex);
+        } else {
+            OpenMagnetics::Boost converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            inductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductance > 0)) throw std::runtime_error("Unable to calculate inductance");
+            netlist = converter.generate_ngspice_circuit(inductance, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_sepic_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        double inductanceL1;
+        std::string netlist;
+        if (isAdvanced) {
+            OpenMagnetics::AdvancedSepic converter(inputsJson);
+            inductanceL1 = converter.get_desired_inductance();
+            netlist = converter.generate_ngspice_circuit(inductanceL1, inputVoltageIndex, operatingPointIndex);
+        } else {
+            OpenMagnetics::Sepic converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            inductanceL1 = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductanceL1 > 0)) throw std::runtime_error("Unable to calculate inductance");
+            netlist = converter.generate_ngspice_circuit(inductanceL1, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_forward_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    return generate_converter_ngspice_circuit_helper_py<OpenMagnetics::SingleSwitchForward, OpenMagnetics::AdvancedSingleSwitchForward>(
+        inputsJson, inputVoltageIndex, operatingPointIndex, "desiredInductance");
+}
+
+std::string generate_two_switch_forward_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    return generate_converter_ngspice_circuit_helper_py<OpenMagnetics::TwoSwitchForward, OpenMagnetics::AdvancedTwoSwitchForward>(
+        inputsJson, inputVoltageIndex, operatingPointIndex, "desiredInductance");
+}
+
+std::string generate_active_clamp_forward_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    return generate_converter_ngspice_circuit_helper_py<OpenMagnetics::ActiveClampForward, OpenMagnetics::AdvancedActiveClampForward>(
+        inputsJson, inputVoltageIndex, operatingPointIndex, "desiredInductance");
+}
+
+std::string generate_push_pull_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    return generate_converter_ngspice_circuit_helper_py<OpenMagnetics::PushPull, OpenMagnetics::AdvancedPushPull>(
+        inputsJson, inputVoltageIndex, operatingPointIndex, "desiredInductance");
+}
+
+std::string generate_isolated_buck_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    return generate_converter_ngspice_circuit_helper_py<OpenMagnetics::IsolatedBuck, OpenMagnetics::AdvancedIsolatedBuck>(
+        inputsJson, inputVoltageIndex, operatingPointIndex, "desiredInductance");
+}
+
+std::string generate_isolated_buck_boost_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    return generate_converter_ngspice_circuit_helper_py<OpenMagnetics::IsolatedBuckBoost, OpenMagnetics::AdvancedIsolatedBuckBoost>(
+        inputsJson, inputVoltageIndex, operatingPointIndex, "desiredInductance");
+}
+
+std::string generate_llc_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        OpenMagnetics::Llc converter(inputsJson);
+        if (inputsJson.contains("desiredResonantInductance") && inputsJson["desiredResonantInductance"].is_number())
+            converter.set_user_resonant_inductance(inputsJson["desiredResonantInductance"].get<double>());
+        if (inputsJson.contains("desiredResonantCapacitance") && inputsJson["desiredResonantCapacitance"].is_number())
+            converter.set_user_resonant_capacitance(inputsJson["desiredResonantCapacitance"].get<double>());
+        auto designRequirements = converter.process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            turnsRatios.push_back(tr.get_nominal().value());
+        }
+        double magnetizingInductance = inputsJson.value("magnetizingInductance", 200e-6);
+        return converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_cllc_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        OpenMagnetics::CllcConverter converter(inputsJson);
+        auto designRequirements = converter.process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        if (turnsRatios.empty()) throw std::runtime_error("CLLC: no turns ratios");
+        auto params = converter.calculate_resonant_parameters();
+        double turnsRatio = turnsRatios[0];
+        return converter.generate_ngspice_circuit(turnsRatio, params, inputVoltageIndex, operatingPointIndex);
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_src_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredTurnsRatios") ||
+                          inputsJson.contains("desiredResonantInductance") ||
+                          inputsJson.contains("desiredResonantCapacitance");
+        std::unique_ptr<OpenMagnetics::Src> model;
+        if (isAdvanced) model = std::make_unique<OpenMagnetics::AdvancedSrc>(inputsJson);
+        else model = std::make_unique<OpenMagnetics::Src>(inputsJson);
+        auto designRequirements = model->process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        if (turnsRatios.empty()) throw std::runtime_error("SRC: no turns ratios");
+        double magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(magnetizingInductance > 0)) throw std::runtime_error("SRC: no magnetizing inductance");
+        return model->generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_dab_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredMagnetizingInductance");
+        std::vector<double> turnsRatios;
+        double magnetizingInductance;
+        std::string netlist;
+        if (isAdvanced) {
+            OpenMagnetics::AdvancedDab converter(inputsJson);
+            magnetizingInductance = converter.get_desired_magnetizing_inductance();
+            turnsRatios = converter.get_desired_turns_ratios();
+            netlist = converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+        } else {
+            OpenMagnetics::Dab converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            for (const auto& tr : designRequirements.get_turns_ratios()) {
+                turnsRatios.push_back(tr.get_nominal().value());
+            }
+            magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(magnetizingInductance > 0)) throw std::runtime_error("Unable to calculate magnetizing inductance");
+            netlist = converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_psfb_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredMagnetizingInductance");
+        std::vector<double> turnsRatios;
+        double magnetizingInductance;
+        std::string netlist;
+        if (isAdvanced) {
+            OpenMagnetics::AdvancedPsfb converter(inputsJson);
+            magnetizingInductance = converter.get_desired_magnetizing_inductance();
+            turnsRatios = converter.get_desired_turns_ratios();
+            netlist = converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+        } else {
+            OpenMagnetics::Psfb converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            for (const auto& tr : designRequirements.get_turns_ratios()) {
+                turnsRatios.push_back(tr.get_nominal().value());
+            }
+            magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(magnetizingInductance > 0)) throw std::runtime_error("Unable to calculate magnetizing inductance");
+            netlist = converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+// ============================================================================
+// 2026-05 parity completion: per-topology ngspice generators for the remaining
+// topologies whose MKF class already exposes generate_ngspice_circuit but had
+// no PyOpenMagnetics wrapper. Each mirrors the parameter extraction of the
+// matching simulate_*_ideal_waveforms function so the two stay consistent.
+// ============================================================================
+
+// --- Single-inductor topologies (Cuk / Zeta / FourSwitchBuckBoost) ---------
+std::string generate_cuk_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        double inductanceL1;
+        std::string netlist;
+        if (isAdvanced) {
+            OpenMagnetics::AdvancedCuk converter(inputsJson);
+            inductanceL1 = converter.get_desired_inductance();
+            netlist = converter.generate_ngspice_circuit(inductanceL1, inputVoltageIndex, operatingPointIndex);
+        } else {
+            OpenMagnetics::Cuk converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            inductanceL1 = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductanceL1 > 0)) throw std::runtime_error("Unable to calculate inductance");
+            netlist = converter.generate_ngspice_circuit(inductanceL1, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_zeta_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        double inductanceL1;
+        std::string netlist;
+        if (isAdvanced) {
+            OpenMagnetics::AdvancedZeta converter(inputsJson);
+            inductanceL1 = converter.get_desired_inductance();
+            netlist = converter.generate_ngspice_circuit(inductanceL1, inputVoltageIndex, operatingPointIndex);
+        } else {
+            OpenMagnetics::Zeta converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            inductanceL1 = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductanceL1 > 0)) throw std::runtime_error("Unable to calculate inductance");
+            netlist = converter.generate_ngspice_circuit(inductanceL1, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_four_switch_buck_boost_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        double inductance;
+        std::string netlist;
+        if (isAdvanced) {
+            OpenMagnetics::AdvancedFourSwitchBuckBoost converter(inputsJson);
+            inductance = converter.get_desired_inductance();
+            netlist = converter.generate_ngspice_circuit(inductance, inputVoltageIndex, operatingPointIndex);
+        } else {
+            OpenMagnetics::FourSwitchBuckBoost converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            inductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(inductance > 0)) throw std::runtime_error("Unable to calculate inductance");
+            netlist = converter.generate_ngspice_circuit(inductance, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+// --- Single-turns-ratio transformer topology (Weinberg) --------------------
+std::string generate_weinberg_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredInductance");
+        double turnsRatio;
+        double magnetizingInductance;
+        std::string netlist;
+        if (isAdvanced) {
+            OpenMagnetics::AdvancedWeinberg converter(inputsJson);
+            magnetizingInductance = converter.get_desired_inductance();
+            turnsRatio = converter.get_desired_turns_ratio();
+            netlist = converter.generate_ngspice_circuit(turnsRatio, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+        } else {
+            OpenMagnetics::Weinberg converter(inputsJson);
+            auto designRequirements = converter.process_design_requirements();
+            turnsRatio = designRequirements.get_turns_ratios()[0].get_nominal().value();
+            magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+            if (!(magnetizingInductance > 0)) throw std::runtime_error("Unable to calculate magnetizing inductance");
+            netlist = converter.generate_ngspice_circuit(turnsRatio, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+        }
+        return netlist;
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+// --- Multi-turns-ratio transformer / resonant topologies -------------------
+std::string generate_clllc_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        OpenMagnetics::Clllc converter(inputsJson);
+        auto designRequirements = converter.process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        if (turnsRatios.empty()) throw std::runtime_error("Clllc: no turns ratios");
+        double magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(magnetizingInductance > 0)) throw std::runtime_error("Clllc: no magnetizing inductance");
+        return converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_vienna_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        bool isAdvanced = inputsJson.contains("desiredBoostInductance");
+        std::unique_ptr<OpenMagnetics::Vienna> model;
+        if (isAdvanced) model = std::make_unique<OpenMagnetics::AdvancedVienna>(inputsJson);
+        else model = std::make_unique<OpenMagnetics::Vienna>(inputsJson);
+        auto designRequirements = model->process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        double boostInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(boostInductance > 0)) throw std::runtime_error("Vienna: no boost inductance");
+        return model->generate_ngspice_circuit(turnsRatios, boostInductance, inputVoltageIndex, operatingPointIndex);
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_pshb_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        OpenMagnetics::AdvancedPshb converter(inputsJson);
+        auto inputs = converter.process();
+        auto designRequirements = inputs.get_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        double magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(magnetizingInductance > 0)) throw std::runtime_error("PSHB: no magnetizing inductance");
+        return converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::string generate_ahb_ngspice_circuit(json inputsJson, size_t inputVoltageIndex, size_t operatingPointIndex) {
+    try {
+        OpenMagnetics::AdvancedAsymmetricHalfBridge converter(inputsJson);
+        auto inputs = converter.process();
+        auto designRequirements = inputs.get_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designRequirements.get_turns_ratios()) {
+            if (tr.get_nominal()) turnsRatios.push_back(tr.get_nominal().value());
+        }
+        double magnetizingInductance = OpenMagnetics::resolve_dimensional_values(designRequirements.get_magnetizing_inductance());
+        if (!(magnetizingInductance > 0)) throw std::runtime_error("AHB: no magnetizing inductance");
+        return converter.generate_ngspice_circuit(turnsRatios, magnetizingInductance, inputVoltageIndex, operatingPointIndex);
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+// --- PFC (line-frequency model; distinct signature from the DC-DC family) ---
+// PFC has no input-voltage / operating-point sweep indices — its SPICE model is
+// parameterised by the boost inductance and circuit damping instead. Inductance
+// is taken from an explicit "inductance" field or derived from the conduction
+// mode, mirroring simulate_pfc_waveforms.
+std::string generate_pfc_ngspice_circuit(json inputsJson, double dcResistance, double simulationTime, double timeStep) {
+    try {
+        OpenMagnetics::PowerFactorCorrection pfcInputs(inputsJson);
+        double inductance;
+        if (inputsJson.contains("inductance")) {
+            inductance = inputsJson["inductance"].get<double>();
+        } else {
+            std::string mode = inputsJson.value("mode", "Continuous Conduction Mode");
+            if (mode == "Continuous Conduction Mode") inductance = pfcInputs.calculate_inductance_ccm();
+            else if (mode == "Critical Conduction Mode") inductance = pfcInputs.calculate_inductance_crcm();
+            else inductance = pfcInputs.calculate_inductance_dcm();
+        }
+        if (!(inductance > 0)) throw std::runtime_error("PFC: unable to calculate inductance");
+        double dcRes = inputsJson.value("dcResistance", dcResistance);
+        return pfcInputs.generate_ngspice_circuit(inductance, dcRes, simulationTime, timeStep);
+    } catch (const std::exception& exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
 void register_converter_bindings(py::module& m) {
     m.def("process_converter", &process_converter,
         "Process a converter topology specification to Inputs.",
@@ -1942,14 +4005,22 @@ void register_converter_bindings(py::module& m) {
     BIND_CONVERTER_ALIAS(calculate_clllc_inputs);
     BIND_CONVERTER_ALIAS(calculate_advanced_clllc_inputs);
     BIND_CONVERTER_ALIAS(calculate_vienna_inputs);
+    BIND_CONVERTER_ALIAS(calculate_advanced_vienna_inputs);
     BIND_CONVERTER_ALIAS(calculate_src_inputs);
+    BIND_CONVERTER_ALIAS(calculate_advanced_src_inputs);
     BIND_CONVERTER_ALIAS(calculate_llc_inputs);
+    BIND_CONVERTER_ALIAS(calculate_advanced_llc_inputs);
     BIND_CONVERTER_ALIAS(calculate_cllc_inputs);
+    BIND_CONVERTER_ALIAS(calculate_advanced_cllc_inputs);
     BIND_CONVERTER_ALIAS(calculate_dab_inputs);
+    BIND_CONVERTER_ALIAS(calculate_advanced_dab_inputs);
     BIND_CONVERTER_ALIAS(calculate_pfc_inputs);
     BIND_CONVERTER_ALIAS(calculate_psfb_inputs);
+    BIND_CONVERTER_ALIAS(calculate_advanced_psfb_inputs);
     BIND_CONVERTER_ALIAS(calculate_pshb_inputs);
+    BIND_CONVERTER_ALIAS(calculate_advanced_pshb_inputs);
     BIND_CONVERTER_ALIAS(calculate_ahb_inputs);
+    BIND_CONVERTER_ALIAS(calculate_advanced_ahb_inputs);
     #undef BIND_CONVERTER_ALIAS
 
     // CMC / DMC wrappers (parity with WebLibMKF). See definitions above.
@@ -1996,6 +4067,133 @@ void register_converter_bindings(py::module& m) {
         "Generate the ngspice SPICE deck for a DMC. Reads minimumInductance from "
         "the inputs JSON or falls back to propose_design().",
         py::arg("dmc_inputs"));
+
+    // Phase B: simulate_*_ideal_waveforms (ngspice-based waveform + operating point extraction)
+    m.def("simulate_flyback_ideal_waveforms", &simulate_flyback_ideal_waveforms,
+        "Simulate Flyback ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_flyback_with_magnetic", &simulate_flyback_with_magnetic,
+        "Simulate Flyback with a pre-built magnetic JSON.", py::arg("inputs"), py::arg("magnetic"));
+    m.def("simulate_buck_ideal_waveforms", &simulate_buck_ideal_waveforms,
+        "Simulate Buck ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_boost_ideal_waveforms", &simulate_boost_ideal_waveforms,
+        "Simulate Boost ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_sepic_ideal_waveforms", &simulate_sepic_ideal_waveforms,
+        "Simulate SEPIC ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_cuk_ideal_waveforms", &simulate_cuk_ideal_waveforms,
+        "Simulate Cuk ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_zeta_ideal_waveforms", &simulate_zeta_ideal_waveforms,
+        "Simulate Zeta ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_four_switch_buck_boost_ideal_waveforms", &simulate_four_switch_buck_boost_ideal_waveforms,
+        "Simulate Four-Switch Buck-Boost ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_forward_ideal_waveforms", &simulate_forward_ideal_waveforms,
+        "Simulate Single-Switch Forward ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_two_switch_forward_ideal_waveforms", &simulate_two_switch_forward_ideal_waveforms,
+        "Simulate Two-Switch Forward ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_active_clamp_forward_ideal_waveforms", &simulate_active_clamp_forward_ideal_waveforms,
+        "Simulate Active-Clamp Forward ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_push_pull_ideal_waveforms", &simulate_push_pull_ideal_waveforms,
+        "Simulate Push-Pull ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_isolated_buck_ideal_waveforms", &simulate_isolated_buck_ideal_waveforms,
+        "Simulate Isolated Buck ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_isolated_buck_boost_ideal_waveforms", &simulate_isolated_buck_boost_ideal_waveforms,
+        "Simulate Isolated Buck-Boost ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_weinberg_ideal_waveforms", &simulate_weinberg_ideal_waveforms,
+        "Simulate Weinberg ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_llc_ideal_waveforms", &simulate_llc_ideal_waveforms,
+        "Simulate LLC ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_cllc_ideal_waveforms", &simulate_cllc_ideal_waveforms,
+        "Simulate CLLC ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_clllc_ideal_waveforms", &simulate_clllc_ideal_waveforms,
+        "Simulate CLLLC ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_src_ideal_waveforms", &simulate_src_ideal_waveforms,
+        "Simulate SRC ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_dab_ideal_waveforms", &simulate_dab_ideal_waveforms,
+        "Simulate DAB ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_psfb_ideal_waveforms", &simulate_psfb_ideal_waveforms,
+        "Simulate PSFB ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_pshb_ideal_waveforms", &simulate_pshb_ideal_waveforms,
+        "Simulate PSHB ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_ahb_ideal_waveforms", &simulate_ahb_ideal_waveforms,
+        "Simulate Asymmetric Half-Bridge ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_vienna_ideal_waveforms", &simulate_vienna_ideal_waveforms,
+        "Simulate Vienna Rectifier ideal waveforms via ngspice.", py::arg("inputs"));
+    m.def("simulate_pfc_waveforms", &simulate_pfc_waveforms,
+        "Simulate PFC waveforms via ngspice.", py::arg("inputs"));
+
+    // Phase B: generate_*_ngspice_circuit (per-topology SPICE netlist generators)
+    m.def("generate_flyback_ngspice_circuit", &generate_flyback_ngspice_circuit,
+        "Generate Flyback ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_buck_ngspice_circuit", &generate_buck_ngspice_circuit,
+        "Generate Buck ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_boost_ngspice_circuit", &generate_boost_ngspice_circuit,
+        "Generate Boost ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_sepic_ngspice_circuit", &generate_sepic_ngspice_circuit,
+        "Generate SEPIC ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_forward_ngspice_circuit", &generate_forward_ngspice_circuit,
+        "Generate Single-Switch Forward ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_two_switch_forward_ngspice_circuit", &generate_two_switch_forward_ngspice_circuit,
+        "Generate Two-Switch Forward ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_active_clamp_forward_ngspice_circuit", &generate_active_clamp_forward_ngspice_circuit,
+        "Generate Active-Clamp Forward ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_push_pull_ngspice_circuit", &generate_push_pull_ngspice_circuit,
+        "Generate Push-Pull ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_isolated_buck_ngspice_circuit", &generate_isolated_buck_ngspice_circuit,
+        "Generate Isolated Buck ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_isolated_buck_boost_ngspice_circuit", &generate_isolated_buck_boost_ngspice_circuit,
+        "Generate Isolated Buck-Boost ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_llc_ngspice_circuit", &generate_llc_ngspice_circuit,
+        "Generate LLC ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_cllc_ngspice_circuit", &generate_cllc_ngspice_circuit,
+        "Generate CLLC ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_src_ngspice_circuit", &generate_src_ngspice_circuit,
+        "Generate SRC ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_dab_ngspice_circuit", &generate_dab_ngspice_circuit,
+        "Generate DAB ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_psfb_ngspice_circuit", &generate_psfb_ngspice_circuit,
+        "Generate PSFB ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_cuk_ngspice_circuit", &generate_cuk_ngspice_circuit,
+        "Generate Cuk ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_zeta_ngspice_circuit", &generate_zeta_ngspice_circuit,
+        "Generate Zeta ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_four_switch_buck_boost_ngspice_circuit", &generate_four_switch_buck_boost_ngspice_circuit,
+        "Generate Four-Switch Buck-Boost ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_weinberg_ngspice_circuit", &generate_weinberg_ngspice_circuit,
+        "Generate Weinberg ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_clllc_ngspice_circuit", &generate_clllc_ngspice_circuit,
+        "Generate CLLLC ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_vienna_ngspice_circuit", &generate_vienna_ngspice_circuit,
+        "Generate Vienna Rectifier ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_pshb_ngspice_circuit", &generate_pshb_ngspice_circuit,
+        "Generate PSHB ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_ahb_ngspice_circuit", &generate_ahb_ngspice_circuit,
+        "Generate Asymmetric Half-Bridge ngspice circuit netlist.",
+        py::arg("inputs"), py::arg("input_voltage_index") = 0, py::arg("operating_point_index") = 0);
+    m.def("generate_pfc_ngspice_circuit", &generate_pfc_ngspice_circuit,
+        "Generate PFC ngspice circuit netlist (line-frequency model; no sweep indices).",
+        py::arg("inputs"), py::arg("dc_resistance") = 0.1, py::arg("simulation_time") = 0.02,
+        py::arg("time_step") = 1e-8);
 }
 
 } // namespace PyMKF

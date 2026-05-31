@@ -468,6 +468,66 @@ json get_default_models() {
     }
 }
 
+std::vector<std::string> get_all_magnetic_field_strength_models() {
+    std::vector<std::string> models;
+    for (auto& [value, name] : magic_enum::enum_entries<OpenMagnetics::MagneticFieldStrengthModels>()) {
+        json aux;
+        to_json(aux, value);
+        models.push_back(aux);
+    }
+    return models;
+}
+
+std::vector<std::string> get_all_fringing_effect_models() {
+    std::vector<std::string> models;
+    for (auto& [value, name] : magic_enum::enum_entries<OpenMagnetics::MagneticFieldStrengthFringingEffectModels>()) {
+        json aux;
+        to_json(aux, value);
+        models.push_back(aux);
+    }
+    return models;
+}
+
+std::vector<std::string> get_all_reluctance_models() {
+    std::vector<std::string> models;
+    for (auto& [value, name] : magic_enum::enum_entries<OpenMagnetics::ReluctanceModels>()) {
+        json aux;
+        to_json(aux, value);
+        models.push_back(aux);
+    }
+    return models;
+}
+
+std::vector<std::string> get_all_stray_capacitance_models() {
+    std::vector<std::string> models;
+    for (auto& [value, name] : magic_enum::enum_entries<OpenMagnetics::StrayCapacitanceModels>()) {
+        json aux;
+        to_json(aux, value);
+        models.push_back(aux);
+    }
+    return models;
+}
+
+std::vector<std::string> get_all_winding_proximity_effect_models() {
+    std::vector<std::string> models;
+    for (auto& [value, name] : magic_enum::enum_entries<OpenMagnetics::WindingProximityEffectLossesModels>()) {
+        json aux;
+        to_json(aux, value);
+        models.push_back(aux);
+    }
+    return models;
+}
+
+std::vector<std::string> get_all_winding_skin_effect_models() {
+    std::vector<std::string> models;
+    for (auto& [value, name] : magic_enum::enum_entries<OpenMagnetics::WindingSkinEffectLossesModels>()) {
+        json aux;
+        to_json(aux, value);
+        models.push_back(aux);
+    }
+    return models;
+}
+
 void register_settings_bindings(py::module& m) {
     m.def("get_constants", &get_constants,
         R"pbdoc(
@@ -531,12 +591,60 @@ void register_settings_bindings(py::module& m) {
     m.def("get_default_models", &get_default_models,
         R"pbdoc(
         Get names of default calculation models.
-        
+
         Returns the default model selections for core losses,
         temperature, reluctance, and magnetic field calculations.
-        
+
         Returns:
             JSON object mapping model types to default model names.
+        )pbdoc");
+
+    m.def("get_all_magnetic_field_strength_models", &get_all_magnetic_field_strength_models,
+        R"pbdoc(
+        Get list of all available magnetic field strength models.
+
+        Returns:
+            List of model name strings.
+        )pbdoc");
+
+    m.def("get_all_fringing_effect_models", &get_all_fringing_effect_models,
+        R"pbdoc(
+        Get list of all available fringing effect models.
+
+        Returns:
+            List of model name strings.
+        )pbdoc");
+
+    m.def("get_all_reluctance_models", &get_all_reluctance_models,
+        R"pbdoc(
+        Get list of all available reluctance models.
+
+        Returns:
+            List of model name strings.
+        )pbdoc");
+
+    m.def("get_all_stray_capacitance_models", &get_all_stray_capacitance_models,
+        R"pbdoc(
+        Get list of all available stray capacitance models.
+
+        Returns:
+            List of model name strings.
+        )pbdoc");
+
+    m.def("get_all_winding_proximity_effect_models", &get_all_winding_proximity_effect_models,
+        R"pbdoc(
+        Get list of all available winding proximity effect models.
+
+        Returns:
+            List of model name strings.
+        )pbdoc");
+
+    m.def("get_all_winding_skin_effect_models", &get_all_winding_skin_effect_models,
+        R"pbdoc(
+        Get list of all available winding skin effect models.
+
+        Returns:
+            List of model name strings.
         )pbdoc");
 }
 

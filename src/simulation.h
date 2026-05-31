@@ -31,6 +31,26 @@ json calculate_resistance_matrix(json magneticJson, double temperature, double f
 // Capacitance calculations
 json calculate_stray_capacitance(json coilJson, json operatingPointJson, json modelsData);
 json calculate_maxwell_capacitance_matrix(json coilJson, json capacitanceAmongWindingsJson);
+json calculate_capacitance_matrix(json coilJson, json modelsData);
+json calculate_capacitance_models_between_windings(double energy, double voltageDrop, double relativeTurnsRatio);
+
+// Sweep functions
+json sweep_impedance_over_frequency(json magneticJson, double start, double stop, size_t numberElements, std::string mode, std::string title);
+json sweep_q_factor_over_frequency(json magneticJson, double start, double stop, size_t numberElements, std::string mode, std::string title);
+json sweep_winding_resistance_over_frequency(json magneticJson, double start, double stop, size_t numberElements, size_t windingIndex, double temperature, std::string mode, std::string title);
+json sweep_resistance_over_frequency(json magneticJson, double start, double stop, size_t numberElements, double temperature, std::string mode, std::string title);
+json sweep_magnetizing_inductance_over_frequency(json magneticJson, double start, double stop, size_t numberElements, double temperature, std::string mode, std::string title);
+json sweep_magnetizing_inductance_over_temperature(json magneticJson, double start, double stop, size_t numberElements, double frequency, std::string mode, std::string title);
+json sweep_magnetizing_inductance_over_dc_bias(json magneticJson, double start, double stop, size_t numberElements, double temperature, std::string mode, std::string title);
+json sweep_core_losses_over_frequency(json magneticJson, json operatingPointJson, double start, double stop, size_t numberElements, double temperature, std::string mode, std::string title);
+json sweep_winding_losses_over_frequency(json magneticJson, json operatingPointJson, double start, double stop, size_t numberElements, double temperature, std::string mode, std::string title);
+
+// Matrix calculations
+json calculate_coupling_coefficient_matrix(json magneticJson, double frequency, json modelsData);
+json calculate_leakage_inductance_matrix(json magneticJson, double frequency, json modelsData);
+
+// Export
+json export_magnetic_as_symbol(json magneticJson, json inputsJson);
 
 void register_simulation_bindings(py::module& m);
 

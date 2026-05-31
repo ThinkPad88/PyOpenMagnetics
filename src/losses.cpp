@@ -298,6 +298,75 @@ double calculate_effective_skin_depth(std::string materialName, json currentJson
     }
 }
 
+json get_available_core_losses_methods(json magneticJson) {
+    try {
+        OpenMagnetics::Magnetic magnetic(magneticJson);
+        auto core = magnetic.get_core();
+        auto material = core.get_functional_description().get_material();
+        auto methods = OpenMagnetics::CoreLossesModel::get_methods(material);
+
+        json result = json::array();
+        for (auto& method : methods) {
+            json aux;
+            to_json(aux, method);
+            result.push_back(aux);
+        }
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json calculate_filling_factor(json coilJson) {
+    try {
+        OpenMagnetics::Coil coil(coilJson, false);
+        auto [areaFillingFactor, otherFactors] = coil.calculate_filling_factor();
+        auto [overlappingFillingFactor, contiguousFillingFactor] = otherFactors;
+
+        json result;
+        result["areaFillingFactor"] = areaFillingFactor;
+        result["overlappingFillingFactor"] = overlappingFillingFactor;
+        result["contiguousFillingFactor"] = contiguousFillingFactor;
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
+json calculate_ac_resistance_coefficients_per_winding(json magneticJson, double temperature, double frequency) {
+    try {
+        OpenMagnetics::Magnetic magnetic(magneticJson);
+        auto coil = magnetic.get_coil();
+
+        json result = json::array();
+        auto windings = coil.get_functional_description();
+        for (size_t windingIndex = 0; windingIndex < windings.size(); ++windingIndex) {
+            auto wire = OpenMagnetics::Coil::resolve_wire(windings[windingIndex]);
+            SignalDescriptor current;
+            Processed processed;
+            processed.set_effective_frequency(frequency);
+            current.set_processed(processed);
+
+            auto dcResistancePerMeter = OpenMagnetics::WindingOhmicLosses::calculate_dc_resistance_per_meter(wire, temperature);
+            auto [skinLossesPerMeter, _] = OpenMagnetics::WindingSkinEffectLosses::calculate_skin_effect_losses_per_meter(wire, current, temperature);
+            auto skinAcFactor = (skinLossesPerMeter + dcResistancePerMeter) / dcResistancePerMeter;
+            result.push_back(skinAcFactor);
+        }
+        return result;
+    }
+    catch (const std::exception &exc) {
+        json exception;
+        exception["data"] = "Exception: " + std::string{exc.what()};
+        return exception;
+    }
+}
+
 void register_losses_bindings(py::module& m) {
     // Core losses
     m.def("calculate_core_losses", &calculate_core_losses,
@@ -606,19 +675,57 @@ void register_losses_bindings(py::module& m) {
     m.def("calculate_effective_skin_depth", &calculate_effective_skin_depth,
         R"pbdoc(
         Calculate effective skin depth for a conductor material.
-        
+
         The skin depth is the depth at which current density falls to 1/e
         of its surface value: delta = sqrt(2*rho / (omega*mu))
-        
+
         Args:
             material_name: Name of conductor material (e.g., "copper").
             current_json: JSON SignalDescriptor with effective frequency.
             temperature: Conductor temperature in Celsius.
-        
+
         Returns:
             Skin depth in meters, or -1 if effective frequency not available.
         )pbdoc",
         py::arg("material_name"), py::arg("current_json"), py::arg("temperature"));
+
+    m.def("get_available_core_losses_methods", &get_available_core_losses_methods,
+        R"pbdoc(
+        Get available core loss calculation methods for a magnetic component.
+
+        Args:
+            magnetic_json: JSON Magnetic object (core + coil).
+
+        Returns:
+            JSON array of available core losses method names.
+        )pbdoc",
+        py::arg("magnetic_json"));
+
+    m.def("calculate_filling_factor", &calculate_filling_factor,
+        R"pbdoc(
+        Calculate the filling factor of a coil.
+
+        Args:
+            coil_json: JSON Coil specification with winding data.
+
+        Returns:
+            JSON object with filling factor data.
+        )pbdoc",
+        py::arg("coil_json"));
+
+    m.def("calculate_ac_resistance_coefficients_per_winding", &calculate_ac_resistance_coefficients_per_winding,
+        R"pbdoc(
+        Calculate AC resistance coefficients (skin effect factor) per winding.
+
+        Args:
+            magnetic_json: JSON Magnetic object.
+            temperature: Wire temperature in Celsius.
+            frequency: Operating frequency in Hz.
+
+        Returns:
+            JSON array of AC resistance factors per winding.
+        )pbdoc",
+        py::arg("magnetic_json"), py::arg("temperature"), py::arg("frequency"));
 }
 
 } // namespace PyMKF

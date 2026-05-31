@@ -1,4 +1,5 @@
 #include "core.h"
+#include "physical_models/ComplexPermeability.h"
 #include <filesystem>
 
 namespace PyMKF {
@@ -420,6 +421,108 @@ double calculate_temperature_from_core_thermal_resistance(json coreJson, double 
     double temperatureRise = totalLosses * thermalResistance;
     
     return ambientTemperature + temperatureRise;
+}
+
+json get_available_core_shapes_by_family(std::string familyString) {
+    try {
+        std::string familyStringUpper = familyString;
+        std::transform(familyStringUpper.begin(), familyStringUpper.end(), familyStringUpper.begin(), ::toupper);
+        auto family = magic_enum::enum_cast<CoreShapeFamily>(familyStringUpper).value();
+        auto shapeNames = OpenMagnetics::get_core_shape_names(family);
+        json result = json::array();
+        for (auto& name : shapeNames) {
+            result.push_back(name);
+        }
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+json get_available_core_shapes_by_manufacturer(std::string manufacturer) {
+    try {
+        auto shapeNames = OpenMagnetics::get_core_shape_names(manufacturer);
+        json result = json::array();
+        for (auto& name : shapeNames) {
+            result.push_back(name);
+        }
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+json get_shape_family_dimensions(std::string familyString, std::string familySubtype) {
+    try {
+        std::string familyStringUpper = familyString;
+        std::transform(familyStringUpper.begin(), familyStringUpper.end(), familyStringUpper.begin(), ::toupper);
+        auto family = magic_enum::enum_cast<CoreShapeFamily>(familyStringUpper).value();
+        auto dimensions = OpenMagnetics::get_shape_family_dimensions(family, familySubtype);
+        json result = json::array();
+        for (auto& dim : dimensions) {
+            result.push_back(dim);
+        }
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+json get_shape_family_subtypes(std::string familyString) {
+    try {
+        std::string familyStringUpper = familyString;
+        std::transform(familyStringUpper.begin(), familyStringUpper.end(), familyStringUpper.begin(), ::toupper);
+        auto family = magic_enum::enum_cast<CoreShapeFamily>(familyStringUpper).value();
+        auto subtypes = OpenMagnetics::get_shape_family_subtypes(family);
+        json result = json::array();
+        for (auto& subtype : subtypes) {
+            result.push_back(subtype);
+        }
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
+}
+
+std::vector<std::string> get_available_core_filters() {
+    std::vector<std::string> filters;
+    for (auto& [value, name] : magic_enum::enum_entries<OpenMagnetics::CoreAdviser::CoreAdviserFilters>()) {
+        filters.push_back(std::string(name));
+    }
+    return filters;
+}
+
+std::vector<double> get_maximum_dimensions(json magneticJson) {
+    try {
+        OpenMagnetics::Magnetic magnetic(magneticJson);
+        return magnetic.get_maximum_dimensions();
+    }
+    catch (const std::exception &exc) {
+        throw std::runtime_error("Exception: " + std::string{exc.what()});
+    }
+}
+
+json calculate_core_data_from_shape(json shapeJson) {
+    return calculate_shape_data(shapeJson);
+}
+
+json calculate_complex_permeability(json materialJson, double frequency) {
+    try {
+        CoreMaterial materialData(materialJson);
+        OpenMagnetics::ComplexPermeability complexPermeabilityObj;
+        auto [realPart, imagPart] = complexPermeabilityObj.get_complex_permeability(materialData, frequency);
+        json result;
+        result["real"] = realPart;
+        result["imaginary"] = imagPart;
+        return result;
+    }
+    catch (const std::exception &exc) {
+        return "Exception: " + std::string{exc.what()};
+    }
 }
 
 void register_core_bindings(py::module& m) {
@@ -944,17 +1047,114 @@ void register_core_bindings(py::module& m) {
     m.def("calculate_temperature_from_core_thermal_resistance", &calculate_temperature_from_core_thermal_resistance,
         R"pbdoc(
         Calculate core temperature from thermal resistance and losses.
-        
+
         T_core = T_ambient + P_loss * R_thermal
-        
+
         Args:
             core_json: JSON Core object with thermal resistance data.
             total_losses: Total power dissipation in Watts.
-        
+
         Returns:
             Estimated core temperature in Celsius.
-        )pbdoc", 
+        )pbdoc",
         py::arg("core_json"), py::arg("total_losses"));
+
+    m.def("get_available_core_shapes_by_family", &get_available_core_shapes_by_family,
+        R"pbdoc(
+        Get available core shape names filtered by family.
+
+        Args:
+            family_string: Core shape family name (e.g., "E", "ETD", "PQ").
+
+        Returns:
+            JSON array of shape name strings in that family.
+        )pbdoc",
+        py::arg("family_string"));
+
+    m.def("get_available_core_shapes_by_manufacturer", &get_available_core_shapes_by_manufacturer,
+        R"pbdoc(
+        Get available core shape names filtered by manufacturer.
+
+        Args:
+            manufacturer: Manufacturer name.
+
+        Returns:
+            JSON array of shape name strings from that manufacturer.
+        )pbdoc",
+        py::arg("manufacturer"));
+
+    m.def("get_shape_family_dimensions", &get_shape_family_dimensions,
+        R"pbdoc(
+        Get dimension names for a shape family and subtype.
+
+        Args:
+            family_string: Core shape family name.
+            family_subtype: Family subtype string.
+
+        Returns:
+            JSON array of dimension name strings.
+        )pbdoc",
+        py::arg("family_string"), py::arg("family_subtype"));
+
+    m.def("get_shape_family_subtypes", &get_shape_family_subtypes,
+        R"pbdoc(
+        Get available subtypes for a shape family.
+
+        Args:
+            family_string: Core shape family name.
+
+        Returns:
+            JSON array of subtype strings.
+        )pbdoc",
+        py::arg("family_string"));
+
+    m.def("get_available_core_filters", &get_available_core_filters,
+        R"pbdoc(
+        Get list of available core adviser filter names.
+
+        Returns:
+            List of filter name strings.
+        )pbdoc");
+
+    m.def("get_maximum_dimensions", &get_maximum_dimensions,
+        R"pbdoc(
+        Get maximum physical dimensions of a magnetic component.
+
+        Args:
+            magnetic_json: JSON Magnetic object.
+
+        Returns:
+            List of maximum dimensions in meters.
+        )pbdoc",
+        py::arg("magnetic_json"));
+
+    m.def("calculate_core_data_from_shape", &calculate_core_data_from_shape,
+        R"pbdoc(
+        Calculate complete core data from shape specification.
+
+        Creates a core with dummy material for shape analysis.
+        Alias for calculate_shape_data.
+
+        Args:
+            shape_json: JSON CoreShape object.
+
+        Returns:
+            JSON Core object with processed dimensions.
+        )pbdoc",
+        py::arg("shape_json"));
+
+    m.def("calculate_complex_permeability", &calculate_complex_permeability,
+        R"pbdoc(
+        Calculate complex permeability of a core material at a given frequency.
+
+        Args:
+            material_json: JSON CoreMaterial object.
+            frequency: Frequency in Hz.
+
+        Returns:
+            JSON object with real and imaginary components.
+        )pbdoc",
+        py::arg("material_json"), py::arg("frequency"));
 }
 
 } // namespace PyMKF

@@ -34,6 +34,11 @@ json calculate_insulation(json inputsJson);
 json get_insulation_layer_insulation_material(json coilJson, std::string layerName);
 json get_isolation_side_from_index(size_t index);
 
+// Insulation helpers
+json set_interlayer_insulation(json coilJson, double layerThickness);
+json set_intersection_insulation(json coilJson, double layerThickness, int numberInsulationLayers);
+json get_solid_insulation_requirements_for_wires(json inputsJson, json patternJson, int repetitions);
+
 void register_winding_bindings(py::module& m);
 
 } // namespace PyMKF

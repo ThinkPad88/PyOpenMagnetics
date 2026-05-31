@@ -763,6 +763,41 @@ inputs = {
 processed = PyOpenMagnetics.process_inputs(inputs)
 ```
 
+### Low-Level Per-Topology API (uniform across all topologies)
+
+Beyond the high-level `process_converter` / `design_magnetics_from_converter`
+entry points, every topology exposes the **same four function families**, so
+any topology can be driven the same way:
+
+```python
+# 1. Input builders — basic and advanced modes (advanced = JSON carries a
+#    desired* inductance/turns-ratio field; both reach the same MKF engine):
+inputs      = PyOpenMagnetics.calculate_dab_inputs(converter)
+inputs_adv  = PyOpenMagnetics.calculate_advanced_dab_inputs(converter)
+
+# 2. Generic dispatch (accepts "<topology>" and "advanced_<topology>"):
+inputs      = PyOpenMagnetics.process_converter("vienna", converter, True)
+
+# 3. Ideal-waveform SPICE simulation:
+waveforms   = PyOpenMagnetics.simulate_vienna_ideal_waveforms(converter)
+
+# 4. ngspice netlist generation:
+netlist     = PyOpenMagnetics.generate_vienna_ngspice_circuit(converter, 0, 0)
+```
+
+Coverage is uniform for: `flyback, buck, boost, single_switch_forward,
+two_switch_forward, active_clamp_forward, push_pull, isolated_buck,
+isolated_buck_boost, cuk, sepic, zeta, four_switch_buck_boost, weinberg, llc,
+cllc, clllc, src, dab, psfb, pshb, asymmetric_half_bridge (ahb), vienna`.
+Both `calculate_<t>_inputs` and `calculate_advanced_<t>_inputs` exist for each
+of these. Exceptions: **PFC** has no advanced variant
+(`calculate_pfc_inputs` only; `generate_pfc_ngspice_circuit(json,
+dc_resistance=0.1, simulation_time=0.02, time_step=1e-8)` uses a
+line-frequency model with no sweep indices), and **current_transformer** is
+measurement-only (`process_current_transformer`). Common- and
+differential-mode chokes have their own `calculate_cmc_inputs` /
+`calculate_advanced_cmc_inputs` / `calculate_dmc_inputs` families.
+
 ## Related Projects
 - **MKF**: C++ magnetics engine - github.com/OpenMagnetics/MKF
 - **MAS**: Magnetic Agnostic Structure JSON schema - github.com/OpenMagnetics/MAS  
