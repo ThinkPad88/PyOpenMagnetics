@@ -9,12 +9,13 @@ json process_converter(const std::string& topologyName, json converterJson, bool
 
 // Combined endpoint: converter -> magnetic designs
 json design_magnetics_from_converter(
-    const std::string& topologyName, 
-    json converterJson, 
-    int maxResults, 
-    json coreModeJson, 
-    bool useNgspice = true, 
-    json weightsJson = nullptr);
+    const std::string& topologyName,
+    json converterJson,
+    int maxResults,
+    json coreModeJson,
+    bool useNgspice = true,
+    json weightsJson = nullptr,
+    bool fast = false);
 
 // Per-topology thin wrappers (from .pyi stubs)
 json process_flyback(json flybackJson);

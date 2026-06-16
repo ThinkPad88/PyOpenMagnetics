@@ -149,7 +149,75 @@ static std::string normalize_topology_name(const std::string& s) {
     return s;
 }
 
+// ─────────────────────────────────────────────────────────────────────
+// Base-spec fast path (ABT #11)
+//
+// The fast path normally constructs an Advanced* converter whose from_json
+// hard-requires `desiredInductance` (e.g. AdvancedBuck, MKF Buck.h:219). A
+// caller passing a BASE spec (operating point + currentRippleRatio, no
+// desiredInductance) would otherwise get
+// `[json.exception.out_of_range.403] key 'desiredInductance' not found`.
+//
+// When `desiredInductance` is absent we instead construct the BASE converter
+// class, whose virtual process_design_requirements() DERIVES the inductance
+// from the operating points + currentRippleRatio (or maximumSwitchCurrent) —
+// the same MKF math the slow path uses. No L-derivation is duplicated here;
+// it all stays in MKF (house rule). If neither desiredInductance nor a ripple
+// driver is present, the base class throws a loud, specific exception rather
+// than substituting a default.
+//
+// Two helpers cover the two simulate signatures: single-inductor topologies
+// (Buck/Boost/Cuk/…) take a scalar inductance; transformer topologies
+// (Flyback/Forward family/IsolatedBuck/…) take (turnsRatios, inductance).
+// ─────────────────────────────────────────────────────────────────────
+template <typename BaseConverter>
+OpenMagnetics::Inputs process_base_spec_scalar_L(const json& converterJson, bool useNgspice, MAS::Topologies topology) {
+    BaseConverter converter(converterJson);
+    converter._assertErrors = true;
+    if (useNgspice) {
+        auto designReqs = converter.process_design_requirements();
+        double inductance = OpenMagnetics::resolve_dimensional_values(designReqs.get_magnetizing_inductance());
+        auto operatingPoints = converter.simulate_and_extract_operating_points(inductance);
+        OpenMagnetics::Inputs result;
+        result.set_design_requirements(designReqs);
+        result.set_operating_points(operatingPoints);
+        result.get_mutable_design_requirements().set_topology(topology);
+        return result;
+    } else {
+        OpenMagnetics::Inputs result = converter.process();
+        result.get_mutable_design_requirements().set_topology(topology);
+        return result;
+    }
+}
+
+template <typename BaseConverter>
+OpenMagnetics::Inputs process_base_spec_vector_L(const json& converterJson, bool useNgspice, MAS::Topologies topology) {
+    BaseConverter converter(converterJson);
+    converter._assertErrors = true;
+    if (useNgspice) {
+        auto designReqs = converter.process_design_requirements();
+        std::vector<double> turnsRatios;
+        for (const auto& tr : designReqs.get_turns_ratios()) {
+            turnsRatios.push_back(OpenMagnetics::resolve_dimensional_values(tr));
+        }
+        double inductance = OpenMagnetics::resolve_dimensional_values(designReqs.get_magnetizing_inductance());
+        auto operatingPoints = converter.simulate_and_extract_operating_points(turnsRatios, inductance);
+        OpenMagnetics::Inputs result;
+        result.set_design_requirements(designReqs);
+        result.set_operating_points(operatingPoints);
+        result.get_mutable_design_requirements().set_topology(topology);
+        return result;
+    } else {
+        OpenMagnetics::Inputs result = converter.process();
+        result.get_mutable_design_requirements().set_topology(topology);
+        return result;
+    }
+}
+
 OpenMagnetics::Inputs process_flyback_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_vector_L<OpenMagnetics::Flyback>(converterJson, useNgspice, MAS::Topologies::FLYBACK_CONVERTER);
+    }
     OpenMagnetics::AdvancedFlyback converter(converterJson);
     converter._assertErrors = true;
     
@@ -184,6 +252,9 @@ OpenMagnetics::Inputs process_flyback_internal(const json& converterJson, bool u
 }
 
 OpenMagnetics::Inputs process_buck_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_scalar_L<OpenMagnetics::Buck>(converterJson, useNgspice, MAS::Topologies::BUCK_CONVERTER);
+    }
     OpenMagnetics::AdvancedBuck converter(converterJson);
     converter._assertErrors = true;
     
@@ -204,6 +275,9 @@ OpenMagnetics::Inputs process_buck_internal(const json& converterJson, bool useN
 }
 
 OpenMagnetics::Inputs process_boost_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_scalar_L<OpenMagnetics::Boost>(converterJson, useNgspice, MAS::Topologies::BOOST_CONVERTER);
+    }
     OpenMagnetics::AdvancedBoost converter(converterJson);
     converter._assertErrors = true;
     
@@ -224,6 +298,9 @@ OpenMagnetics::Inputs process_boost_internal(const json& converterJson, bool use
 }
 
 OpenMagnetics::Inputs process_single_switch_forward_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_vector_L<OpenMagnetics::SingleSwitchForward>(converterJson, useNgspice, MAS::Topologies::SINGLE_SWITCH_FORWARD_CONVERTER);
+    }
     OpenMagnetics::AdvancedSingleSwitchForward converter(converterJson);
     converter._assertErrors = true;
     
@@ -248,6 +325,9 @@ OpenMagnetics::Inputs process_single_switch_forward_internal(const json& convert
 }
 
 OpenMagnetics::Inputs process_two_switch_forward_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_vector_L<OpenMagnetics::TwoSwitchForward>(converterJson, useNgspice, MAS::Topologies::TWO_SWITCH_FORWARD_CONVERTER);
+    }
     OpenMagnetics::AdvancedTwoSwitchForward converter(converterJson);
     converter._assertErrors = true;
     
@@ -272,6 +352,9 @@ OpenMagnetics::Inputs process_two_switch_forward_internal(const json& converterJ
 }
 
 OpenMagnetics::Inputs process_active_clamp_forward_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_vector_L<OpenMagnetics::ActiveClampForward>(converterJson, useNgspice, MAS::Topologies::ACTIVE_CLAMP_FORWARD_CONVERTER);
+    }
     OpenMagnetics::AdvancedActiveClampForward converter(converterJson);
     converter._assertErrors = true;
     
@@ -296,6 +379,9 @@ OpenMagnetics::Inputs process_active_clamp_forward_internal(const json& converte
 }
 
 OpenMagnetics::Inputs process_push_pull_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_vector_L<OpenMagnetics::PushPull>(converterJson, useNgspice, MAS::Topologies::PUSH_PULL_CONVERTER);
+    }
     OpenMagnetics::AdvancedPushPull converter(converterJson);
     converter._assertErrors = true;
     
@@ -428,6 +514,9 @@ OpenMagnetics::Inputs process_pshb_internal(const json& converterJson, bool useN
 }
 
 OpenMagnetics::Inputs process_isolated_buck_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_vector_L<OpenMagnetics::IsolatedBuck>(converterJson, useNgspice, MAS::Topologies::ISOLATED_BUCK_CONVERTER);
+    }
     OpenMagnetics::AdvancedIsolatedBuck converter(converterJson);
     converter._assertErrors = true;
     
@@ -452,6 +541,9 @@ OpenMagnetics::Inputs process_isolated_buck_internal(const json& converterJson, 
 }
 
 OpenMagnetics::Inputs process_isolated_buck_boost_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_vector_L<OpenMagnetics::IsolatedBuckBoost>(converterJson, useNgspice, MAS::Topologies::ISOLATED_BUCK_BOOST_CONVERTER);
+    }
     OpenMagnetics::AdvancedIsolatedBuckBoost converter(converterJson);
     converter._assertErrors = true;
     
@@ -511,6 +603,9 @@ OpenMagnetics::Inputs process_pfc_internal(const json& converterJson) {
 // ─────────────────────────────────────────────────────────────────────
 
 OpenMagnetics::Inputs process_cuk_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_scalar_L<OpenMagnetics::Cuk>(converterJson, useNgspice, MAS::Topologies::CUK_CONVERTER);
+    }
     OpenMagnetics::AdvancedCuk converter(converterJson);
     converter._assertErrors = true;
     if (useNgspice) {
@@ -530,6 +625,9 @@ OpenMagnetics::Inputs process_cuk_internal(const json& converterJson, bool useNg
 }
 
 OpenMagnetics::Inputs process_sepic_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_scalar_L<OpenMagnetics::Sepic>(converterJson, useNgspice, MAS::Topologies::SEPIC_CONVERTER);
+    }
     OpenMagnetics::AdvancedSepic converter(converterJson);
     converter._assertErrors = true;
     if (useNgspice) {
@@ -549,6 +647,9 @@ OpenMagnetics::Inputs process_sepic_internal(const json& converterJson, bool use
 }
 
 OpenMagnetics::Inputs process_zeta_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_scalar_L<OpenMagnetics::Zeta>(converterJson, useNgspice, MAS::Topologies::ZETA_CONVERTER);
+    }
     OpenMagnetics::AdvancedZeta converter(converterJson);
     converter._assertErrors = true;
     if (useNgspice) {
@@ -568,6 +669,9 @@ OpenMagnetics::Inputs process_zeta_internal(const json& converterJson, bool useN
 }
 
 OpenMagnetics::Inputs process_four_switch_buck_boost_internal(const json& converterJson, bool useNgspice) {
+    if (!converterJson.contains("desiredInductance")) {
+        return process_base_spec_scalar_L<OpenMagnetics::FourSwitchBuckBoost>(converterJson, useNgspice, MAS::Topologies::FOUR_SWITCH_BUCK_BOOST_CONVERTER);
+    }
     OpenMagnetics::AdvancedFourSwitchBuckBoost converter(converterJson);
     converter._assertErrors = true;
     if (useNgspice) {
@@ -610,6 +714,35 @@ OpenMagnetics::Inputs process_asymmetric_half_bridge_internal(const json& conver
 }
 
 OpenMagnetics::Inputs process_weinberg_internal(const json& converterJson, bool useNgspice) {
+    // Base-spec fast path (ABT #11): derive L from the base Weinberg when no
+    // desiredInductance is supplied. Inlined (not via the shared helper)
+    // because Weinberg's simulate signature takes a SCALAR turns ratio
+    // (single-secondary topology), not the vector the other transformers use.
+    if (!converterJson.contains("desiredInductance")) {
+        OpenMagnetics::Weinberg converter(converterJson);
+        converter._assertErrors = true;
+        if (useNgspice) {
+            auto designReqs = converter.process_design_requirements();
+            std::vector<double> turnsRatios;
+            for (const auto& tr : designReqs.get_turns_ratios()) {
+                turnsRatios.push_back(OpenMagnetics::resolve_dimensional_values(tr));
+            }
+            if (turnsRatios.empty()) {
+                throw std::runtime_error("Weinberg converter requires at least one turns ratio");
+            }
+            double inductance = OpenMagnetics::resolve_dimensional_values(designReqs.get_magnetizing_inductance());
+            auto operatingPoints = converter.simulate_and_extract_operating_points(turnsRatios[0], inductance);
+            OpenMagnetics::Inputs result;
+            result.set_design_requirements(designReqs);
+            result.set_operating_points(operatingPoints);
+            result.get_mutable_design_requirements().set_topology(MAS::Topologies::WEINBERG_CONVERTER);
+            return result;
+        } else {
+            OpenMagnetics::Inputs result = converter.process();
+            result.get_mutable_design_requirements().set_topology(MAS::Topologies::WEINBERG_CONVERTER);
+            return result;
+        }
+    }
     OpenMagnetics::AdvancedWeinberg converter(converterJson);
     converter._assertErrors = true;
     if (useNgspice) {
@@ -788,16 +921,50 @@ json process_converter(const std::string& topologyName, json converterJson, bool
     return process_converter_internal(normalized, converterJson, useNgspice);
 }
 
+// Build candidate magnetics from a converter object via the MKF template
+// method, threading the `fast` flag (fast core-only adviser vs full
+// winding+simulation adviser) and optional per-filter weights.
+template <typename ConverterType>
+static std::vector<std::pair<OpenMagnetics::Mas, double>> advise_from_converter_spec(
+        const json& converterJson, bool fast,
+        const std::map<OpenMagnetics::MagneticFilters, double>& weights,
+        int maxResults, OpenMagnetics::MagneticAdviser& adviser) {
+    ConverterType converter(converterJson);
+    converter._assertErrors = true;
+    return weights.empty()
+        ? adviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+        : adviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
+}
+
+// Single-inductor, non-isolated family (Buck/Boost/Cuk/Sepic/Zeta/
+// FourSwitchBuckBoost). Their Advanced* class requires ONLY desiredInductance
+// on top of a plain converter spec, so we pick the model purely on the
+// presence of that key: Advanced* when the user pins L (honoured as the
+// nominal target), Base when absent (L derived from the ripple budget in
+// MKF). Transformer/resonant families do NOT get this duality — their
+// Advanced* from_json also requires desiredTurnsRatios (Flyback also
+// desiredDutyCycle), i.e. design *outputs* a converter spec does not carry —
+// so they always use the Base model, which derives turns + L itself.
+template <typename Base, typename Advanced>
+static std::vector<std::pair<OpenMagnetics::Mas, double>> advise_inductor_family(
+        const json& converterJson, bool fast,
+        const std::map<OpenMagnetics::MagneticFilters, double>& weights,
+        int maxResults, OpenMagnetics::MagneticAdviser& adviser) {
+    return converterJson.contains("desiredInductance")
+        ? advise_from_converter_spec<Advanced>(converterJson, fast, weights, maxResults, adviser)
+        : advise_from_converter_spec<Base>(converterJson, fast, weights, maxResults, adviser);
+}
+
 // Simplified design_magnetics_from_converter using MKF template method
 json design_magnetics_from_converter(
     const std::string& topologyNameRaw,
-    json converterJson, 
-    int maxResults, 
-    json coreModeJson, 
-    bool useNgspice, 
-    json weightsJson) {
-    
-    (void)useNgspice;  // Template method always uses ngspice
+    json converterJson,
+    int maxResults,
+    json coreModeJson,
+    bool useNgspice,
+    json weightsJson,
+    bool fast) {
+
 
     // Accept MAS 1.0 camelCase, pre-1.0 Title Case, or internal short form.
     const std::string topologyName = normalize_topology_name(topologyNameRaw);
@@ -821,125 +988,109 @@ json design_magnetics_from_converter(
         
         std::vector<std::pair<OpenMagnetics::Mas, double>> masMagnetics;
         
-        // Use MKF template method - handles all converters automatically.
-        // For Buck / Boost the basic process_design_requirements() sets
-        // only `magnetizingInductance.minimum` (a ripple-floor), and
-        // the CoreAdviser picks the smallest core satisfying it
-        // regardless of the L the user asked for. Dispatch to the
-        // Advanced* subclass so spec.desiredInductance becomes the
-        // nominal target (AdvancedBuck/Boost::process_design_requirements
-        // override does this, MKF commit 8acd72c7).
+        // Build candidate magnetics from the converter spec via the MKF
+        // template method. Two independent axes (4 behaviours total):
         //
-        // Flyback stays on the basic ctor: AdvancedFlyback's from_json
-        // requires extra fields (desiredDutyCycle, desiredTurnsRatios)
-        // that aren't in a normal converter spec. The basic
-        // Flyback::process_design_requirements already sets nominal
-        // from its V·s + duty-cycle derivation, so the magnetic gets
-        // sized correctly without the Advanced* path.
+        //   * Base vs Advanced* model — chosen PER TOPOLOGY:
+        //       - Single-inductor family (Buck/Boost/Cuk/Sepic/Zeta/
+        //         FourSwitchBuckBoost): advise_inductor_family() picks
+        //         Advanced* when desiredInductance is present (honoured as the
+        //         nominal L target), Base otherwise (L derived from the ripple
+        //         budget). This is ABT #11 — the slow path used to force
+        //         Advanced for Buck/Boost and throw on a base spec.
+        //       - Transformer/resonant families: always Base. Their Advanced*
+        //         from_json requires desiredTurnsRatios (Flyback also
+        //         desiredDutyCycle) — design outputs a converter spec lacks —
+        //         so only Base is constructible; it derives turns + L itself.
+        //   * fast flag — fast core-only adviser vs full winding+sim adviser,
+        //     threaded into get_advised_magnetic_from_converter for every
+        //     topology.
         if (topologyName == "flyback" || topologyName == "advanced_flyback") {
             OpenMagnetics::Flyback converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "buck" || topologyName == "advanced_buck") {
-            OpenMagnetics::AdvancedBuck converter(converterJson);
-            converter._assertErrors = true;
-            masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+            masMagnetics = advise_inductor_family<OpenMagnetics::Buck, OpenMagnetics::AdvancedBuck>(
+                converterJson, fast, weights, maxResults, magneticAdviser);
         }
         else if (topologyName == "boost" || topologyName == "advanced_boost") {
-            OpenMagnetics::AdvancedBoost converter(converterJson);
-            converter._assertErrors = true;
-            masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+            masMagnetics = advise_inductor_family<OpenMagnetics::Boost, OpenMagnetics::AdvancedBoost>(
+                converterJson, fast, weights, maxResults, magneticAdviser);
         }
         else if (topologyName == "single_switch_forward") {
             OpenMagnetics::SingleSwitchForward converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "two_switch_forward") {
             OpenMagnetics::TwoSwitchForward converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "active_clamp_forward") {
             OpenMagnetics::ActiveClampForward converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "push_pull") {
             OpenMagnetics::PushPull converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "isolated_buck") {
             OpenMagnetics::IsolatedBuck converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "isolated_buck_boost") {
             OpenMagnetics::IsolatedBuckBoost converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "llc" || topologyName == "advanced_llc") {
             OpenMagnetics::Llc converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "cuk" || topologyName == "advanced_cuk") {
-            OpenMagnetics::Cuk converter(converterJson);
-            converter._assertErrors = true;
-            masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+            masMagnetics = advise_inductor_family<OpenMagnetics::Cuk, OpenMagnetics::AdvancedCuk>(
+                converterJson, fast, weights, maxResults, magneticAdviser);
         }
         else if (topologyName == "sepic" || topologyName == "advanced_sepic") {
-            OpenMagnetics::Sepic converter(converterJson);
-            converter._assertErrors = true;
-            masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+            masMagnetics = advise_inductor_family<OpenMagnetics::Sepic, OpenMagnetics::AdvancedSepic>(
+                converterJson, fast, weights, maxResults, magneticAdviser);
         }
         else if (topologyName == "zeta" || topologyName == "advanced_zeta") {
-            OpenMagnetics::Zeta converter(converterJson);
-            converter._assertErrors = true;
-            masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+            masMagnetics = advise_inductor_family<OpenMagnetics::Zeta, OpenMagnetics::AdvancedZeta>(
+                converterJson, fast, weights, maxResults, magneticAdviser);
         }
         else if (topologyName == "four_switch_buck_boost" || topologyName == "advanced_four_switch_buck_boost") {
-            OpenMagnetics::FourSwitchBuckBoost converter(converterJson);
-            converter._assertErrors = true;
-            masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+            masMagnetics = advise_inductor_family<OpenMagnetics::FourSwitchBuckBoost, OpenMagnetics::AdvancedFourSwitchBuckBoost>(
+                converterJson, fast, weights, maxResults, magneticAdviser);
         }
         else if (topologyName == "asymmetric_half_bridge" || topologyName == "advanced_asymmetric_half_bridge") {
             OpenMagnetics::AsymmetricHalfBridge converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "phase_shifted_full_bridge" || topologyName == "psfb" ||
                  topologyName == "advanced_phase_shifted_full_bridge" || topologyName == "advanced_psfb") {
@@ -952,36 +1103,36 @@ json design_magnetics_from_converter(
             OpenMagnetics::Psfb converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "weinberg" || topologyName == "advanced_weinberg") {
             OpenMagnetics::Weinberg converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "vienna" || topologyName == "advanced_vienna") {
             OpenMagnetics::Vienna converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "clllc" || topologyName == "advanced_clllc") {
             OpenMagnetics::Clllc converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "src" || topologyName == "advanced_src") {
             OpenMagnetics::Src converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else if (topologyName == "dab" || topologyName == "advanced_dab" ||
                  topologyName == "dual_active_bridge") {
@@ -992,18 +1143,26 @@ json design_magnetics_from_converter(
             OpenMagnetics::Dab converter(converterJson);
             converter._assertErrors = true;
             masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults)
-                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults);
+                ? magneticAdviser.get_advised_magnetic_from_converter(converter, maxResults, fast)
+                : magneticAdviser.get_advised_magnetic_from_converter(converter, weights, maxResults, fast);
         }
         else {
-            // Fall back to old approach for other topologies
+            // Fall back for topologies without a converter-model adviser path
+            // (e.g. PFC, current transformer). dispatch_converter / the
+            // process_*_internal it calls already pick Base vs Advanced on the
+            // presence of desiredInductance (ABT #11), so the Base/Advanced
+            // behaviour is preserved here too; only the adviser stage differs.
             json inputsJson = process_converter_internal(topologyName, converterJson, useNgspice);
             if (inputsJson.contains("error")) return inputsJson;
-            
+
             OpenMagnetics::Inputs inputs(inputsJson);
-            masMagnetics = weights.empty()
-                ? magneticAdviser.get_advised_magnetic(inputs, maxResults)
-                : magneticAdviser.get_advised_magnetic(inputs, weights, maxResults);
+            if (fast) {
+                masMagnetics = magneticAdviser.get_advised_magnetic_fast(inputs, maxResults);
+            } else if (weights.empty()) {
+                masMagnetics = magneticAdviser.get_advised_magnetic(inputs, maxResults);
+            } else {
+                masMagnetics = magneticAdviser.get_advised_magnetic(inputs, weights, maxResults);
+            }
         }
         
         // Build results (same as before)
@@ -3944,9 +4103,10 @@ void register_converter_bindings(py::module& m) {
     
     m.def("design_magnetics_from_converter", &design_magnetics_from_converter,
         "Design magnetic components from a converter specification.",
-        py::arg("topology_name"), py::arg("converter_json"), 
+        py::arg("topology_name"), py::arg("converter_json"),
         py::arg("max_results") = 1, py::arg("core_mode_json") = "available cores",
-        py::arg("use_ngspice") = true, py::arg("weights_json") = nullptr);
+        py::arg("use_ngspice") = true, py::arg("weights_json") = nullptr,
+        py::arg("fast") = false);
     
     m.def("process_flyback", &process_flyback, "Process Flyback converter.", py::arg("flyback"));
     m.def("process_buck", &process_buck, "Process Buck converter.", py::arg("buck"));
