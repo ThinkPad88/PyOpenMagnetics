@@ -25,10 +25,6 @@ json calculate_core_losses(json coreData, json coilData, json inputsData, json m
     if (models.find("coreLosses") != models.end()) {
         OpenMagnetics::from_json(models["coreLosses"], coreLossesModelName);
     }
-    auto coreTemperatureModelName = OpenMagnetics::defaults.coreTemperatureModelDefault;
-    if (models.find("coreTemperature") != models.end()) {
-        OpenMagnetics::from_json(models["coreTemperature"], coreTemperatureModelName);
-    }
 
     OpenMagnetics::Magnetic magnetic;
     magnetic.set_core(core);
@@ -36,7 +32,6 @@ json calculate_core_losses(json coreData, json coilData, json inputsData, json m
 
     OpenMagnetics::MagneticSimulator magneticSimulator;
     magneticSimulator.set_core_losses_model_name(coreLossesModelName);
-    magneticSimulator.set_core_temperature_model_name(coreTemperatureModelName);
     magneticSimulator.set_reluctance_model_name(reluctanceModelName);
     auto coreLossesOutput = magneticSimulator.calculate_core_losses(operatingPoint, magnetic);
     json result;
@@ -63,15 +58,6 @@ json get_core_losses_model_information(json material) {
     info["internal_links"] = OpenMagnetics::CoreLossesModel::get_models_internal_links();
     info["external_links"] = OpenMagnetics::CoreLossesModel::get_models_external_links();
     info["available_models"] = OpenMagnetics::CoreLossesModel::get_methods_string(material);
-    return info;
-}
-
-json get_core_temperature_model_information() {
-    json info;
-    info["information"] = OpenMagnetics::CoreTemperatureModel::get_models_information();
-    info["errors"] = OpenMagnetics::CoreTemperatureModel::get_models_errors();
-    info["internal_links"] = OpenMagnetics::CoreTemperatureModel::get_models_internal_links();
-    info["external_links"] = OpenMagnetics::CoreTemperatureModel::get_models_external_links();
     return info;
 }
 
@@ -383,7 +369,6 @@ void register_losses_bindings(py::module& m) {
             models_data: JSON dict specifying models to use:
                 - "coreLosses": "STEINMETZ", "IGSE", "MSE", "BARG", "ROSHEN", "PROPRIETARY"
                 - "reluctance": "ZHANG", "MUEHLETHALER", "PARTRIDGE", "STENGLEIN"
-                - "coreTemperature": Model for temperature estimation
         
         Returns:
             JSON object containing:
@@ -422,14 +407,6 @@ void register_losses_bindings(py::module& m) {
                 - available_models: Models valid for the given material
         )pbdoc",
         py::arg("material"));
-    
-    m.def("get_core_temperature_model_information", &get_core_temperature_model_information,
-        R"pbdoc(
-        Get documentation for available core temperature models.
-        
-        Returns:
-            JSON object with model information, errors, and reference links.
-        )pbdoc");
     
     m.def("calculate_steinmetz_coefficients", &calculate_steinmetz_coefficients,
         R"pbdoc(

@@ -179,8 +179,7 @@ def simulate_losses(magnetic, specs):
     print("\n[1] Calculating core losses...")
     models = {
         "coreLosses": "IGSE",
-        "reluctance": "ZHANG",
-        "coreTemperature": "MANIKTALA"
+        "reluctance": "ZHANG"
     }
     
     try:

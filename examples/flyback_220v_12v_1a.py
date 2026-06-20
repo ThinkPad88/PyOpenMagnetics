@@ -287,8 +287,7 @@ def design_flyback_transformer():
     
     models = {
         "coreLosses": "IGSE",
-        "reluctance": "ZHANG",
-        "coreTemperature": "MANIKTALA"
+        "reluctance": "ZHANG"
     }
     
     best_design = None

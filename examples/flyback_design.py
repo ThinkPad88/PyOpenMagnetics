@@ -127,8 +127,7 @@ def design_flyback_transformer():
     
     models = {
         "coreLosses": "IGSE",
-        "reluctance": "ZHANG",
-        "coreTemperature": "MANIKTALA"
+        "reluctance": "ZHANG"
     }
     
     for i, item in enumerate(magnetics):

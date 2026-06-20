@@ -7,7 +7,6 @@ namespace PyMKF {
 // Core losses
 json calculate_core_losses(json coreData, json coilData, json inputsData, json modelsData);
 json get_core_losses_model_information(json material);
-json get_core_temperature_model_information();
 json calculate_steinmetz_coefficients(json dataJson, json rangesJson);
 json calculate_steinmetz_coefficients_with_error(json dataJson, json rangesJson);
 

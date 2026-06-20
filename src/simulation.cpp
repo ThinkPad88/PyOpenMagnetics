@@ -15,14 +15,9 @@ json simulate(json inputsJson, json magneticJson, json modelsData) {
         if (!modelsData.is_null() && modelsData.find("coreLosses") != modelsData.end()) {
             OpenMagnetics::from_json(modelsData["coreLosses"], coreLossesModelName);
         }
-        auto coreTemperatureModelName = OpenMagnetics::defaults.coreTemperatureModelDefault;
-        if (!modelsData.is_null() && modelsData.find("coreTemperature") != modelsData.end()) {
-            OpenMagnetics::from_json(modelsData["coreTemperature"], coreTemperatureModelName);
-        }
-        
+
         OpenMagnetics::MagneticSimulator magneticSimulator;
         magneticSimulator.set_core_losses_model_name(coreLossesModelName);
-        magneticSimulator.set_core_temperature_model_name(coreTemperatureModelName);
         magneticSimulator.set_reluctance_model_name(reluctanceModelName);
         auto mas = magneticSimulator.simulate(inputs, magnetic);
 
