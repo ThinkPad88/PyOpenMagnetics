@@ -9,53 +9,58 @@ on:
 jobs:
   build_wheel:
     runs-on: windows-latest
-    timeout-minutes: 90
+    timeout-minutes: 120
     steps:
-      # 开启NTFS长路径，解决Windows260字符路径限制
+      # 开启NTFS长路径，解决260字符限制
       - name: Enable NTFS long path support
         run: |
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 
-      # 拉取完整代码+递归子模块(CAS/PEAS/cci_coords)
+      # 拉取主仓库 + 递归子模块
       - name: Checkout source with recursive submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
+          fetch-depth: 0
 
-      # 安装Node + quicktype（CMake生成MAS.hpp/CAS.hpp必须依赖）
+      # 【核心修复1】手动完整更新MKF内部全部嵌套子模块(CAS/PEAS/cci_coords)
+      - name: Full update MKF submodules
+        run: |
+          git submodule update --init --recursive --force
+          git submodule foreach --recursive git pull origin main
+
+      # 安装Node + quicktype（生成MAS.hpp/CAS.hpp必需）
       - name: Setup Node.js 22
         uses: actions/setup-node@v4
-        with:
-          node-version: 22
       - name: Global install quicktype
         run: npm install -g quicktype
 
-      # 加载完整MSVC x64编译环境(cl.exe/nmake)
+      # 加载MSVC x64编译环境
       - name: Load MSVC 18 x64 dev environment
         uses: ilammy/msvc-dev-cmd@v1.13.0
 
-      # Python 3.9 匹配项目适配版本
+      # Python 3.9
       - name: Setup Python 3.9 x64
         uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
 
-      # 编译构建步骤（完全对齐CMakeLists配置，删除冲突参数）
+      # 编译构建（新增防FetchContent刷新变量，对齐CMake C++23标准）
       - name: Build Windows wheel package
         run: |
-          # CMake强制C++23，和项目CMake统一，无需手动加警告屏蔽（文件内置/W0）
+          # 【核心修复2】禁止FetchContent自动删除/重新拉取源码，保留完整schema文件
+          $env:FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
+          # 强制C++23，匹配项目CMakeLists
           $env:CMAKE_CXX_STANDARD = "23"
           $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
-          # 限制并行编译线程，防止CI内存溢出OOM崩溃
+          # 限制线程防止OOM内存溢出
           $env:MAKEFLAGS = "-j2"
-          # 短构建目录减少路径长度
+          # 短构建目录减少超长路径
           $env:CMAKE_BINARY_DIR = "D:\build_tmp"
-          # 升级Python编译依赖套件
+          # 升级编译依赖
           python -m pip install --upgrade pip setuptools scikit-build-core cmake build
-          # 执行wheel打包，CMake内部自动处理/bigobj /Ox /W0
+          # 开始打包
           python -m build --wheel
 
-      # 上传编译完成whl安装包
+      # 上传成品whl
       - name: Upload built wheel artifact
         uses: actions/upload-artifact@v4
         with:
