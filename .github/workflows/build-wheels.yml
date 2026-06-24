@@ -11,56 +11,71 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
-      # 开启NTFS长路径，解决260字符限制
-      - name: Enable NTFS long path support
+      # 开启Windows长路径260字符限制解除
+      - name: Enable NTFS Long Path Registry
         run: |
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 
-      # 拉取主仓库 + 递归子模块
-      - name: Checkout source with recursive submodules
+      # 完整递归拉取所有层级子模块 CAS/PEAS/cci_coords
+      - name: Checkout full repo & recursive submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      # 【核心修复1】手动完整更新MKF内部全部嵌套子模块(CAS/PEAS/cci_coords)
-      - name: Full update MKF submodules
-        run: |
-          git submodule update --init --recursive --force
-          git submodule foreach --recursive git pull origin main
+      # 强制同步所有子模块，确保schemas文件完整无缺失
+      - name: Force sync all submodules
+        run: git submodule update --init --recursive --force
 
-      # 安装Node + quicktype（生成MAS.hpp/CAS.hpp必需）
-      - name: Setup Node.js 22
+      # 【关键修复】预拷贝PEAS完整schemas目录到构建根目录，解决quicktype路径引用失效
+      - name: Copy PEAS schemas to build root (fix schema ref missing)
+        run: |
+          mkdir -Force build_temp
+          Copy-Item -Path ./PEAS/schemas -Destination ./build_temp/PEAS/schemas -Recurse -Force
+
+      # Node.js 22 + 全局安装quicktype
+      - name: Setup Node.js v22
         uses: actions/setup-node@v4
-      - name: Global install quicktype
+        with:
+          node-version: "22"
+      - name: Install quicktype globally
         run: npm install -g quicktype
 
-      # 加载MSVC x64编译环境
-      - name: Load MSVC 18 x64 dev environment
+      # 加载MSVC x64完整编译环境 cl.exe / MSBuild
+      - name: Load MSVC x64 dev env
         uses: ilammy/msvc-dev-cmd@v1.13.0
 
-      # Python 3.9
-      - name: Setup Python 3.9 x64
+      # 锁定Python3.9（项目原生适配版本，3.12存在ABI兼容隐患）
+      - name: Setup fixed Python 3.9
         uses: actions/setup-python@v5
+        with:
+          python-version: "3.9"
 
-      # 编译构建（新增防FetchContent刷新变量，对齐CMake C++23标准）
-      - name: Build Windows wheel package
+      # 编译构建核心脚本（全部Windows PowerShell兼容环境变量）
+      - name: Build wheel package (fix schema path + C++23 + memory limit)
         run: |
-          # 【核心修复2】禁止FetchContent自动删除/重新拉取源码，保留完整schema文件
-          $env:FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
-          # 强制C++23，匹配项目CMakeLists
+          # 强制C++23匹配项目CMakeLists标准
           $env:CMAKE_CXX_STANDARD = "23"
           $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
-          # 限制线程防止OOM内存溢出
+          # MSVC编译参数：关闭所有警告、支持超大obj文件
+          $env:CXXFLAGS = "/W0 /bigobj"
+          # 限制2线程编译，防止Windows runner内存OOM崩溃
           $env:MAKEFLAGS = "-j2"
+          # CMake禁止在线拉取依赖，固定本地子模块文件
+          $env:CMAKE_FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
           # 短构建目录减少超长路径
           $env:CMAKE_BINARY_DIR = "D:\build_tmp"
-          # 升级编译依赖
+          # quicktype强制仅读取本地文件，不请求网络schema
+          $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
+          # 把预拷贝的PEAS目录注入CMake检索路径
+          $env:CMAKE_INCLUDE_PATH = "$(Get-Location)/build_temp"
+
+          # 升级全套Python编译依赖
           python -m pip install --upgrade pip setuptools scikit-build-core cmake build
-          # 开始打包
+          # 正式编译打包Windows amd64 wheel
           python -m build --wheel
 
-      # 上传成品whl
+      # 上传编译成功的whl安装包
       - name: Upload built wheel artifact
         uses: actions/upload-artifact@v4
         with:
