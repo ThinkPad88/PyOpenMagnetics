@@ -11,63 +11,63 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
-      # 开启Windows NTFS长路径，解除260字符限制
+      # 开启NTFS长路径支持，规避超长路径报错
       - name: Enable NTFS Long Path Registry
         run: |
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 
-      # 拉取完整代码+递归所有子模块(CAS/PEAS/cci_coords)
+      # 完整拉取代码+递归同步所有嵌套子模块(CAS/PEAS/cci_coords)
       - name: Checkout full repo & recursive submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      # 强制刷新所有嵌套子模块，保证schema文件完整
+      # 强制刷新子模块，确保PEAS schema文件完整拉取
       - name: Force sync all git submodules
         run: git submodule update --init --recursive --force
 
-      # 安装Node + quicktype（JSON转C++代码必需工具）
+      # 安装Node + quicktype（JSON转C++代码依赖）
       - name: Setup Node.js v22
         uses: actions/setup-node@v4
       - name: Global install quicktype
         run: npm install -g quicktype
 
-      # 加载完整MSVC x64编译环境
-      - name: Load MSVC x64 dev environment
+      # 加载VS2026 MSVC x64编译环境
+      - name: Load MSVC x64 dev cmd
         uses: ilammy/msvc-dev-cmd@v1.13.0
 
-      # 锁定Python3.9（项目原生适配版本，规避3.12 ABI兼容问题）
+      # 锁定Python 3.9（匹配项目稳定ABI）
       - name: Setup Python 3.9
         uses: actions/setup-python@v5
         with:
           python-version: "3.9"
 
-      # 构建核心：配置quicktype本地解析+CMake全局参数
-      - name: Build wheel package
+      # 构建前置环境注入（核心防远程拉取）
+      - name: Build wheel with fixed quicktype env
         run: |
-          # 强制全局C++23，匹配项目CMakeLists标准
+          # 全局强制C++23标准
           $env:CMAKE_CXX_STANDARD = "23"
           $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
-          # MSVC编译参数：关闭全部警告、支持超大源文件
+          # MSVC编译参数：关闭冗余警告、支持超大obj文件
           $env:CXXFLAGS = "/W0 /bigobj"
-          # 限制2线程编译，防止Windows runner内存溢出崩溃
+          # 限制编译线程，防止runner内存溢出
           $env:MAKEFLAGS = "-j2"
-          # CMake禁止远程拉取第三方依赖，全部使用本地文件
+          # CMake离线模式，禁止FetchContent联网更新依赖
           $env:CMAKE_FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
-          # 短构建目录，减少超长路径报错概率
-          $env:CMAKE_BINARY_DIR = "D:\build_tmp"
-          # 关键修复：禁用quicktype网络远程schema拉取，仅本地读取
+          # 禁止quicktype发起网络请求获取外部schema（关键环境变量）
           $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
-          # 注入构建根目录给quicktype，用于解析JSON内$ref相对路径
-          $env:QUICKTYPE_BASE_DIR = "$(Get-Location)/build"
+          # 注入项目根目录作为schema检索基准
+          $env:QUICKTYPE_BASE_DIR = "$(Get-Location)"
+          # 注入MKF源码目录，CMake可读取PEAS完整路径
+          $env:MKF_SCHEMA_ROOT = "$(Get-Location)/_deps/mkf-src/PEAS/schemas"
 
-          # 升级全套Python编译依赖
+          # 升级全套编译依赖
           python -m pip install --upgrade pip setuptools scikit-build-core cmake build
-          # 执行打包生成Windows amd64 wheel
+          # 执行wheel打包
           python -m build --wheel
 
-      # 编译完成后上传whl产物
+      # 上传编译产物
       - name: Upload built wheel artifact
         uses: actions/upload-artifact@v4
         with:
