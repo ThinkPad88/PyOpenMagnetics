@@ -3,56 +3,47 @@ on:
   workflow_dispatch:
   push:
     branches: [ main ]
-  pull_request: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
   build_windows_wheel:
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
-      # 开启NTFS长路径
       - name: Enable NTFS Long Path Registry
         run: |
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 
-      # 拉取完整仓库+递归子模块
       - name: Checkout full repo & recursive submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      # 强制同步所有子模块
       - name: Force sync all git submodules
         run: git submodule update --init --recursive --force
 
-      # Node + quicktype
       - name: Setup Node.js v22
         uses: actions/setup-node@v4
+
       - name: Install quicktype globally
         run: npm install -g quicktype
 
-      # MSVC x64 编译环境
       - name: Load MSVC x64 dev cmd
         uses: ilammy/msvc-dev-cmd@v1.13.0
 
-      # Python 3.9
       - name: Setup Python 3.9
         uses: actions/setup-python@v5
         with:
           python-version: "3.9"
 
-      # 1. 先完整安装依赖，修复 python -m build 找不到模块问题
       - name: Install Python build dependencies
         run: |
           python -m pip install --upgrade pip setuptools scikit-build-core cmake build
-          # 刷新环境变量，防止模块未加载
-          refreshenv
 
-      # 2. 配置全局quicktype防网络拉取 + C++编译参数
-      - name: Build wheel with schema fix
+      - name: Build & fix schema path
         run: |
-          # 核心环境变量：禁止quicktype联网获取schema
           $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
           $env:CMAKE_CXX_STANDARD = "23"
           $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
@@ -60,22 +51,20 @@ jobs:
           $env:MAKEFLAGS = "-j2"
           $env:CMAKE_FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
 
-          # 先执行cmake生成_deps/mkf-src目录
+          # 预执行CMake拉取所有deps生成目录
           cmake -S . -B build/cp39-cp39-win_amd64 -DCMAKE_CXX_STANDARD=23 -DCMAKE_CXX_STANDARD_REQUIRED=ON
 
-          # 复制PEAS schemas到构建目录，解决$ref路径找不到
+          # 拷贝PEAS schema到构建目录
           $srcSchema = "build/cp39-cp39-win_amd64/_deps/mkf-src/PEAS/schemas"
           $dstSchema = "build/cp39-cp39-win_amd64/schemas"
           mkdir -Force $dstSchema
           Copy-Item "$srcSchema/*" -Destination "$dstSchema" -Recurse -Force
 
-          # 指定quicktype检索根目录
+          # 指定quicktype基准目录
           $env:QUICKTYPE_BASE_DIR = "$(Get-Location)/build/cp39-cp39-win_amd64"
 
-          # 正式打包生成wheel
           python -m build --wheel
-      
-      # 上传产物
+
       - name: Upload built wheel artifact
         uses: actions/upload-artifact@v4
         with:
