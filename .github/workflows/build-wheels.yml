@@ -28,6 +28,7 @@ jobs:
 
       - name: Setup Node.js v22
         uses: actions/setup-node@v4
+
       - name: Install quicktype globally
         run: npm install -g quicktype
 
@@ -54,7 +55,8 @@ jobs:
           $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
           # 传入项目根目录给CMake，用于定位PEAS schema
           $root = $(Get-Location)
-          python -m build --wheel -C"-DCMAKE_ARGS=-DPEAS_SCHEMA_ROOT=$root/_deps/mkf-src/PEAS/schemas"
+          # 使用 scikit-build-core 0.10+ 的 cmake.define 格式
+          python -m build --wheel -C"cmake.define.PEAS_SCHEMA_ROOT=$root/_deps/mkf-src/PEAS/schemas"
 
       - name: Upload built wheel artifact
         uses: actions/upload-artifact@v4
