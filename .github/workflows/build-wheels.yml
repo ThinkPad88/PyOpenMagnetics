@@ -11,62 +11,63 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
-      # 开启Windows长路径限制
+      # 开启Windows NTFS长路径，解除260字符限制
       - name: Enable NTFS Long Path Registry
         run: |
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 
-      # 拉取完整代码+递归子模块
+      # 拉取完整代码+递归所有子模块(CAS/PEAS/cci_coords)
       - name: Checkout full repo & recursive submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      # 强制同步所有嵌套子模块（CAS / PEAS / cci_coords 包含在mkf子模块内）
-      - name: Force sync all submodules
+      # 强制刷新所有嵌套子模块，保证schema文件完整
+      - name: Force sync all git submodules
         run: git submodule update --init --recursive --force
 
-      # Node + quicktype
+      # 安装Node + quicktype（JSON转C++代码必需工具）
       - name: Setup Node.js v22
         uses: actions/setup-node@v4
-        with:
-          node-version: "22"
-      - name: Install quicktype globally
+      - name: Global install quicktype
         run: npm install -g quicktype
 
-      # MSVC编译环境
-      - name: Load MSVC x64 dev env
+      # 加载完整MSVC x64编译环境
+      - name: Load MSVC x64 dev environment
         uses: ilammy/msvc-dev-cmd@v1.13.0
 
-      # 锁定Python 3.9
-      - name: Setup fixed Python 3.9
+      # 锁定Python3.9（项目原生适配版本，规避3.12 ABI兼容问题）
+      - name: Setup Python 3.9
         uses: actions/setup-python@v5
         with:
           python-version: "3.9"
 
-      # 构建前置配置
+      # 构建核心：配置quicktype本地解析+CMake全局参数
       - name: Build wheel package
         run: |
+          # 强制全局C++23，匹配项目CMakeLists标准
           $env:CMAKE_CXX_STANDARD = "23"
           $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
+          # MSVC编译参数：关闭全部警告、支持超大源文件
           $env:CXXFLAGS = "/W0 /bigobj"
+          # 限制2线程编译，防止Windows runner内存溢出崩溃
           $env:MAKEFLAGS = "-j2"
+          # CMake禁止远程拉取第三方依赖，全部使用本地文件
           $env:CMAKE_FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
+          # 短构建目录，减少超长路径报错概率
           $env:CMAKE_BINARY_DIR = "D:\build_tmp"
+          # 关键修复：禁用quicktype网络远程schema拉取，仅本地读取
           $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
+          # 注入构建根目录给quicktype，用于解析JSON内$ref相对路径
+          $env:QUICKTYPE_BASE_DIR = "$(Get-Location)/build"
 
+          # 升级全套Python编译依赖
           python -m pip install --upgrade pip setuptools scikit-build-core cmake build
+          # 执行打包生成Windows amd64 wheel
           python -m build --wheel
 
-      # 【修正后】从mkf子模块目录复制schema文件，解决找不到路径问题
-      - name: Copy PEAS schema files (fix quicktype ref error)
-        run: |
-          mkdir -Force build_temp
-          # 从子模块真实目录复制，不再使用仓库根目录PEAS
-          Copy-Item -Path .\_deps\mkf-src\PEAS\schemas -Destination .\build_temp\PEAS\schemas -Recurse -Force
-
-      # 上传产物
+      # 编译完成后上传whl产物
       - name: Upload built wheel artifact
         uses: actions/upload-artifact@v4
         with:
