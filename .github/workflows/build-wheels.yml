@@ -1,41 +1,59 @@
-name: Build PyOpenMagnetics Wheels
+name: Build PyOpenMagnetics Windows Wheel
 on:
   workflow_dispatch:
   push:
-    branches: [main]
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
 
 jobs:
-  build_wheels:
-    runs-on: ubuntu-latest
-    timeout-minutes: 60
+  build_wheel:
+    runs-on: windows-latest
+    timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: true  # 拉取全部子模块CAS/PEAS
-
-      - name: Install Node.js + quicktype
+      # 开启系统长路径限制（彻底解决Windows 260字符路径超长报错）
+      - name: Enable NTFS long path
         run: |
-          sudo apt update
-          sudo apt install nodejs npm -y
-          npm install -g quicktype
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 
-      - name: Install C++ build tools
-        run: sudo apt install gcc g++ cmake make -y
+      # 强制检出到极短目录，避免嵌套路径过长
+      - name: Checkout source to short path
+        uses: actions/checkout@v4
+        with:
+          path: C:\src\magnet
+          submodules: recursive
 
-      - name: Set up Python 3.9
+      # 安装Node.js + quicktype（用于自动生成MAS.hpp）
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Install quicktype
+        run: npm install -g quicktype
+
+      # 加载MSVC编译环境，提供cl.exe与NMake
+      - name: Load MSVC compiler environment
+        uses: ilammy/msvc-dev-cmd@v1.13.0
+
+      # 配置Python 3.9
+      - name: Setup Python 3.9
         uses: actions/setup-python@v5
         with:
           python-version: "3.9"
 
-      - name: Build wheel with environment flags
+      # 编译配置：屏蔽警告+限制线程防OOM+指定短构建目录
+      - name: Build wheel package
         run: |
-          export CFLAGS="-Wno-unused-variable -Wno-unused-parameter"
-          export CXXFLAGS="-Wno-unused-variable -Wno-unused-parameter"
-          export MAKEFLAGS="-j$(nproc)"
-          pip install --upgrade pip setuptools scikit-build-core cmake build
+          cd C:\src\magnet
+          $env:CFLAGS = "-Wno-unused-variable -Wno-unused-parameter"
+          $env:CXXFLAGS = "-Wno-unused-variable -Wno-unused-parameter"
+          $env:MAKEFLAGS = "-j2"
+          $env:CMAKE_BINARY_DIR = "C:\build_tmp"
+          python -m pip install --upgrade pip setuptools scikit-build-core cmake build
           python -m build --wheel
 
+      # 上传编译完成的whl安装包
       - name: Upload built wheel
         uses: actions/upload-artifact@v4
         with:
-          path: dist/*.whl
+          path: C:\src\magnet\dist\*.whl
