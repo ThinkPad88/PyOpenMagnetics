@@ -1,12 +1,8 @@
 name: Build PyOpenMagnetics Wheels
-
-# 补上缺失的事件触发配置，解决 No event triggers defined in `on`
 on:
+  workflow_dispatch:
   push:
-    branches: [ main ]
-  pull_request:
-    branches: [ main ]
-  workflow_dispatch:  # 支持手动点击运行
+    branches: [main]
 
 jobs:
   build_wheels:
@@ -14,26 +10,32 @@ jobs:
     timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
+        with:
+          submodules: true  # 拉取全部子模块CAS/PEAS
 
-      - name: Set up Python
+      - name: Install Node.js + quicktype
+        run: |
+          sudo apt update
+          sudo apt install nodejs npm -y
+          npm install -g quicktype
+
+      - name: Install C++ build tools
+        run: sudo apt install gcc g++ cmake make -y
+
+      - name: Set up Python 3.9
         uses: actions/setup-python@v5
         with:
           python-version: "3.9"
 
-      - name: Install system & build dependencies
+      - name: Build wheel with environment flags
         run: |
-          sudo apt update
-          sudo apt install gcc g++ cmake make
-          # 屏蔽未使用变量告警 + 开启多核并行编译，防止超时
           export CFLAGS="-Wno-unused-variable -Wno-unused-parameter"
           export CXXFLAGS="-Wno-unused-variable -Wno-unused-parameter"
           export MAKEFLAGS="-j$(nproc)"
           pip install --upgrade pip setuptools scikit-build-core cmake build
+          python -m build --wheel
 
-      - name: Build wheel package
-        run: python -m build --wheel
-
-      - name: Upload built wheel artifact
+      - name: Upload built wheel
         uses: actions/upload-artifact@v4
         with:
           path: dist/*.whl
