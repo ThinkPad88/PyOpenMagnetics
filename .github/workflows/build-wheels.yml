@@ -11,49 +11,48 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      # 开启系统长路径限制（彻底解决Windows 260字符路径超长报错）
+      # 开启Windows长路径，解除260字符限制
       - name: Enable NTFS long path
         run: |
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 
-      # 强制检出到极短目录，避免嵌套路径过长
-      - name: Checkout source to short path
+      # 检出到仓库内部短文件夹，不再跨盘符，解决路径报错
+      - name: Checkout source
         uses: actions/checkout@v4
         with:
-          path: C:\src\magnet
           submodules: recursive
 
-      # 安装Node.js + quicktype（用于自动生成MAS.hpp）
+      # 安装 quicktype
       - name: Setup Node.js
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
       - name: Install quicktype
         run: npm install -g quicktype
 
-      # 加载MSVC编译环境，提供cl.exe与NMake
+      # 加载MSVC编译环境
       - name: Load MSVC compiler environment
         uses: ilammy/msvc-dev-cmd@v1.13.0
 
-      # 配置Python 3.9
+      # Python 3.9
       - name: Setup Python 3.9
         uses: actions/setup-python@v5
         with:
           python-version: "3.9"
 
-      # 编译配置：屏蔽警告+限制线程防OOM+指定短构建目录
+      # 编译配置：短构建目录+限制线程+屏蔽警告
       - name: Build wheel package
         run: |
-          cd C:\src\magnet
           $env:CFLAGS = "-Wno-unused-variable -Wno-unused-parameter"
           $env:CXXFLAGS = "-Wno-unused-variable -Wno-unused-parameter"
           $env:MAKEFLAGS = "-j2"
-          $env:CMAKE_BINARY_DIR = "C:\build_tmp"
+          # CMake构建目录放到磁盘根短路径，避免嵌套超长
+          $env:CMAKE_BINARY_DIR = "D:\build_tmp"
           python -m pip install --upgrade pip setuptools scikit-build-core cmake build
           python -m build --wheel
 
-      # 上传编译完成的whl安装包
+      # 上传whl
       - name: Upload built wheel
         uses: actions/upload-artifact@v4
         with:
-          path: C:\src\magnet\dist\*.whl
+          path: dist\*.whl
