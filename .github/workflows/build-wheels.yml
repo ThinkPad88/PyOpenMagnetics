@@ -39,12 +39,15 @@ jobs:
         with:
           python-version: "3.9"
 
-      # 编译配置：改用MSVC警告屏蔽参数，移除GCC参数
+      # 编译配置：开启C++17 + MSVC告警屏蔽 + 限制线程防OOM
       - name: Build wheel package
         run: |
-          # MSVC屏蔽未使用变量警告，不再使用-Wno-xxx
-          $env:CXXFLAGS = "/wd4101 /wd4100"
+          # MSVC屏蔽未使用变量警告
+          $env:CXXFLAGS = "/wd4101 /wd4100 /std:c++17"
           $env:CFLAGS = "/wd4101 /wd4100"
+          # 强制CMake全局C++标准
+          $env:CMAKE_CXX_STANDARD = "17"
+          $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
           # 限制线程防止内存溢出
           $env:MAKEFLAGS = "-j2"
           # 构建目录放到短路径
