@@ -1,3 +1,13 @@
+name: Build PyOpenMagnetics Wheels
+
+# 补上缺失的事件触发配置，解决 No event triggers defined in `on`
+on:
+  push:
+    branches: [ main ]
+  pull_request:
+    branches: [ main ]
+  workflow_dispatch:  # 支持手动点击运行
+
 jobs:
   build_wheels:
     runs-on: ubuntu-latest
@@ -10,19 +20,20 @@ jobs:
         with:
           python-version: "3.9"
 
-      - name: Install build deps
+      - name: Install system & build dependencies
         run: |
           sudo apt update
           sudo apt install gcc g++ cmake make
+          # 屏蔽未使用变量告警 + 开启多核并行编译，防止超时
           export CFLAGS="-Wno-unused-variable -Wno-unused-parameter"
           export CXXFLAGS="-Wno-unused-variable -Wno-unused-parameter"
           export MAKEFLAGS="-j$(nproc)"
           pip install --upgrade pip setuptools scikit-build-core cmake build
 
-      - name: Build wheel
+      - name: Build wheel package
         run: python -m build --wheel
 
-      - name: Upload wheel
+      - name: Upload built wheel artifact
         uses: actions/upload-artifact@v4
         with:
           path: dist/*.whl
