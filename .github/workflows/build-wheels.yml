@@ -1,24 +1,28 @@
 jobs:
   build_wheels:
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
     steps:
       - uses: actions/checkout@v4
 
-      - name: Setup Node.js
-        uses: actions/setup-node@v4
+      - name: Set up Python
+        uses: actions/setup-python@v5
         with:
-          node-version: 20  # 锁定Node20，避免Node24兼容性问题
+          python-version: "3.9"
 
-      - name: Clean build dir + install quicktype
-        shell: cmd
+      - name: Install build deps
         run: |
-          if exist build rmdir /S /Q build
-          npm config set registry https://registry.npmmirror.com
-          npm install -g quicktype@23.0.170
+          sudo apt update
+          sudo apt install gcc g++ cmake make
+          export CFLAGS="-Wno-unused-variable -Wno-unused-parameter"
+          export CXXFLAGS="-Wno-unused-variable -Wno-unused-parameter"
+          export MAKEFLAGS="-j$(nproc)"
+          pip install --upgrade pip setuptools scikit-build-core cmake build
 
-      - name: Build wheels
-        uses: pypa/cibuildwheel@v3.4.0
-        env:
-          CIBW_PYTHON_VERSIONS: "3.10 3.11 3.12 3.13"
-          CIBW_PLATFORMS: "windows_amd64"
-          # 删掉原来的 CIBW_SKIP=pp* 这一行！
+      - name: Build wheel
+        run: python -m build --wheel
+
+      - name: Upload wheel
+        uses: actions/upload-artifact@v4
+        with:
+          path: dist/*.whl
