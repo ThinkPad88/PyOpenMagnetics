@@ -4,8 +4,6 @@ on:
   push:
     branches: [ main ]
   pull_request:
-    branches: [ main ]
-
 jobs:
   build_windows_wheel:
     runs-on: windows-latest
@@ -15,18 +13,27 @@ jobs:
         run: |
           New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 
+      - name: Clean workspace completely
+        run: |
+          Remove-Item ./* -Recurse -Force -ErrorAction SilentlyContinue
+
       - name: Checkout full repo & recursive submodules
         uses: actions/checkout@v4
         with:
           submodules: recursive
           fetch-depth: 0
 
-      - name: Force sync all git submodules
-        run: git submodule update --init --recursive --force
+      - name: Full reset & repair all git submodules
+        run: |
+          git clean -ffdx
+          git reset --hard HEAD
+          git submodule deinit --all -f
+          git submodule sync
+          git submodule update --init --recursive --force
+          git submodule foreach "git clean -ffdx; git reset --hard"
 
       - name: Setup Node.js v22
         uses: actions/setup-node@v4
-
       - name: Install quicktype globally
         run: npm install -g quicktype
 
@@ -42,29 +49,19 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools scikit-build-core cmake build
 
-      - name: Build & fix schema path
+      - name: Build wheel with full fixes
         run: |
-          $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
-          $env:CMAKE_CXX_STANDARD = "23"
-          $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
+          # 全局CMake参数：修复FetchContent弃用警告、离线模式
+          $env:CMAKE_ARGS = "-DCMAKE_POLICY_DEFAULT_CMP0169=OLD -DCMAKE_FETCHCONTENT_UPDATES_DISCONNECTED=ON -DCMAKE_CXX_STANDARD=23 -DCMAKE_CXX_STANDARD_REQUIRED=ON"
           $env:CXXFLAGS = "/W0 /bigobj"
           $env:MAKEFLAGS = "-j2"
-          $env:CMAKE_FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
+          # 禁止quicktype联网获取schema
+          $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
+          $env:QUICKTYPE_BASE_DIR = "$(Get-Location)"
 
-          # 预执行CMake拉取所有deps生成目录
-          cmake -S . -B build/cp39-cp39-win_amd64 -DCMAKE_CXX_STANDARD=23 -DCMAKE_CXX_STANDARD_REQUIRED=ON
-
-          # 拷贝PEAS schema到构建目录
-          $srcSchema = "build/cp39-cp39-win_amd64/_deps/mkf-src/PEAS/schemas"
-          $dstSchema = "build/cp39-cp39-win_amd64/schemas"
-          mkdir -Force $dstSchema
-          Copy-Item "$srcSchema/*" -Destination "$dstSchema" -Recurse -Force
-
-          # 指定quicktype基准目录
-          $env:QUICKTYPE_BASE_DIR = "$(Get-Location)/build/cp39-cp39-win_amd64"
-
+          # 直接调用build，cmake自动处理依赖，增加policy兼容旧FetchContent
           python -m build --wheel
-
+      
       - name: Upload built wheel artifact
         uses: actions/upload-artifact@v4
         with:
