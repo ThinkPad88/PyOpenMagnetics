@@ -1,68 +1,31 @@
-name: Build PyOpenMagnetics Windows Wheel
-on:
-  workflow_dispatch:
-  push:
-    branches: [ main ]
-  pull_request:
-jobs:
-  build_windows_wheel:
-    runs-on: windows-latest
-    timeout-minutes: 120
-    steps:
-      - name: Enable NTFS Long Path Registry
-        run: |
-          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
-
-      - name: Clean workspace completely
-        run: |
-          Remove-Item ./* -Recurse -Force -ErrorAction SilentlyContinue
-
-      - name: Checkout full repo & recursive submodules
-        uses: actions/checkout@v4
-        with:
-          submodules: recursive
-          fetch-depth: 0
-
-      - name: Full reset & repair all git submodules
-        run: |
-          git clean -ffdx
-          git reset --hard HEAD
-          git submodule deinit --all -f
-          git submodule sync
-          git submodule update --init --recursive --force
-          git submodule foreach "git clean -ffdx; git reset --hard"
-
-      - name: Setup Node.js v22
-        uses: actions/setup-node@v4
-      - name: Install quicktype globally
-        run: npm install -g quicktype
-
-      - name: Load MSVC x64 dev cmd
-        uses: ilammy/msvc-dev-cmd@v1.13.0
-
-      - name: Setup Python 3.9
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.9"
-
-      - name: Install Python build dependencies
-        run: |
-          python -m pip install --upgrade pip setuptools scikit-build-core cmake build
-
-      - name: Build wheel with full fixes
-        run: |
-          # 全局CMake参数：修复FetchContent弃用警告、离线模式
-          $env:CMAKE_ARGS = "-DCMAKE_POLICY_DEFAULT_CMP0169=OLD -DCMAKE_FETCHCONTENT_UPDATES_DISCONNECTED=ON -DCMAKE_CXX_STANDARD=23 -DCMAKE_CXX_STANDARD_REQUIRED=ON"
-          $env:CXXFLAGS = "/W0 /bigobj"
-          $env:MAKEFLAGS = "-j2"
-          # 禁止quicktype联网获取schema
-          $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
-          $env:QUICKTYPE_BASE_DIR = "$(Get-Location)"
-
-          # 直接调用build，cmake自动处理依赖，增加policy兼容旧FetchContent
-          python -m build --wheel
-      
-      - name: Upload built wheel artifact
-        uses: actions/upload-artifact@v4
-        with:
-          path: dist\*.whl
+InitializeBuildStatus:
+  Creating "x64\Release\cci_data_gen\cci_data_gen.tlog\unsuccessfulbuild" because "AlwaysCreate" was specified.
+  Touching "x64\Release\cci_data_gen\cci_data_gen.tlog\unsuccessfulbuild".
+ComputeCustomBuildOutput:
+  Creating directory "D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\generated\".
+CustomBuild:
+  "The build of 'D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\CMakeFiles\7637bdbeb3e8a9f8b4889ecc619f7a0e\cci_data_gen.rule' depends on 'D:\A\PYOPENMAGNETICS\PYOPENMAGNETICS\BUILD\CP39-CP39-WIN_AMD64\GENERATED\CCICOORDINATESDATA.CPP' which is produced by the build of 'D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\CMakeFiles\8b24b09868446521d739d9ca505b06c6\CciCoordinatesData.cpp.rule'. The items cannot be built in parallel."
+  Generating embedded CCI coordinates
+  Embedding 1000 cci coordinate sets (N up to 1000, 500500 coordinate pairs total)
+  Written: D:/a/PyOpenMagnetics/PyOpenMagnetics/build/cp39-cp39-win_amd64/generated/CciCoordinatesData.cpp
+  Building Custom Rule D:/a/PyOpenMagnetics/PyOpenMagnetics/CMakeLists.txt
+FinalizeBuildStatus:
+  Deleting file "x64\Release\cci_data_gen\cci_data_gen.tlog\unsuccessfulbuild".
+  Touching "x64\Release\cci_data_gen\cci_data_gen.tlog\cci_data_gen.lastbuildstate".
+Done Building Project "D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\cci_data_gen.vcxproj" (default targets).
+Done Building Project "D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\PyOpenMagnetics.vcxproj" (default targets) -- FAILED.
+Done Building Project "D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\ALL_BUILD.vcxproj" (default targets) -- FAILED.
+Build FAILED.
+"D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\ALL_BUILD.vcxproj" (default target) (1) ->
+"D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\PyOpenMagnetics.vcxproj" (default target) (3) ->
+"D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\PyCASGeneration.vcxproj" (default target) (4) ->
+"D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\PyMASGeneration.vcxproj" (default target) (5) ->
+(CustomBuild target) -> 
+  CUSTOMBUILD : error : Could not fetch schema , referred to from d:/a/PyOpenMagnetics/PyOpenMagnetics/build/cp39-cp39-win_amd64/_deps/mkf-src/PEAS/schemas/outputs/lossElementPerHarmonic.json#allOf/0. [D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\PyMASGeneration.vcxproj]
+  C:\Program Files\Microsoft Visual Studio\18\Enterprise\MSBuild\Microsoft\VC\v180\Microsoft.CppCommon.targets(254,5): error MSB8066: Custom build for 'D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\CMakeFiles\4bf9d9d3cfb2fdb4eb049a78a3d58e36\MAS.hpp.rule;D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\CMakeFiles\7637bdbeb3e8a9f8b4889ecc619f7a0e\PyMASGeneration.rule;D:\a\PyOpenMagnetics\PyOpenMagnetics\CMakeLists.txt' exited with code 1. [D:\a\PyOpenMagnetics\PyOpenMagnetics\build\cp39-cp39-win_amd64\PyMASGeneration.vcxproj]
+    0 Warning(s)
+    2 Error(s)
+Time Elapsed 00:00:04.18
+*** CMake build failed
+ERROR Backend subprocess exited when trying to invoke build_wheel
+Error: Process completed with exit code 1.
