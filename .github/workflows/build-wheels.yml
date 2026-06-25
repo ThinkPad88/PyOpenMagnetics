@@ -11,7 +11,7 @@ jobs:
     steps:
       - name: Enable NTFS Long Path Registry
         run: |
-          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\Control\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
+          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
 
       - name: Checkout full repo & recursive submodules
         uses: actions/checkout@v4
@@ -28,7 +28,6 @@ jobs:
 
       - name: Setup Node.js v22
         uses: actions/setup-node@v4
-
       - name: Install quicktype globally
         run: npm install -g quicktype
 
@@ -44,19 +43,33 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools scikit-build-core cmake build
 
-      - name: Build wheel with schema root CMake param
+      # 新增关键前置步骤：先执行cmake拉取所有依赖，再拷贝schema同级目录
+      - name: Pre CMake & copy schemas to fix $ref path
+        run: |
+          $env:CMAKE_CXX_STANDARD = "23"
+          $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
+          $env:CXXFLAGS = "/W0 /bigobj"
+          $env:CMAKE_FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
+          $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
+          # 先初始化cmake生成_deps目录
+          cmake -S . -B build/cp39-cp39-win_amd64
+          # 定义源、目标路径
+          $srcSchema = "build/cp39-cp39-win_amd64/_deps/mkf-src/PEAS/schemas"
+          $dstOutput = "$src/outputs"
+          # 把schemas根所有文件复制到output文件夹（lossElementPerHarmonic同级）
+          Copy-Item "$srcSchema/*" -Destination "$dstOutput" -Recurse -Force
+          Write-Host "Copied all schema files to outputs folder for relative ref fix"
+
+      - name: Build wheel (无多余cmake参数，规避变量未使用警告)
         run: |
           $env:CMAKE_CXX_STANDARD = "23"
           $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
           $env:CXXFLAGS = "/W0 /bigobj"
           $env:MAKEFLAGS = "-j2"
           $env:CMAKE_FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
-          # 禁止quicktype访问网络schema
           $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
-          # 传入项目根目录给CMake，用于定位PEAS schema
-          $root = $(Get-Location)
-          # 使用 scikit-build-core 0.10+ 的 cmake.define 格式
-          python -m build --wheel -C"cmake.define.PEAS_SCHEMA_ROOT=$root/_deps/mkf-src/PEAS/schemas"
+          # 不再传递PEAS_SCHEMA变量，消除unused警告
+          python -m build --wheel -Ccmake.define=CMAKE_CXX_STANDARD=23 -Ccmake.define=CMAKE_CXX_STANDARD_REQUIRED=ON
 
       - name: Upload built wheel artifact
         uses: actions/upload-artifact@v4
