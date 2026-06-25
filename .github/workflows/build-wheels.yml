@@ -9,10 +9,6 @@ jobs:
     runs-on: windows-latest
     timeout-minutes: 120
     steps:
-      - name: Enable NTFS Long Path Registry
-        run: |
-          New-ItemProperty -Path "HKLM:\SYSTEM\CurrentControlSet\FileSystem" -Name LongPathsEnabled -Value 1 -PropertyType DWord -Force
-
       - name: Checkout full repo & recursive submodules
         uses: actions/checkout@v4
         with:
@@ -43,7 +39,6 @@ jobs:
         run: |
           python -m pip install --upgrade pip setuptools scikit-build-core cmake build
 
-      # 新增关键前置步骤：先执行cmake拉取所有依赖，再拷贝schema同级目录
       - name: Pre CMake & copy schemas to fix $ref path
         run: |
           $env:CMAKE_CXX_STANDARD = "23"
@@ -51,16 +46,12 @@ jobs:
           $env:CXXFLAGS = "/W0 /bigobj"
           $env:CMAKE_FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
           $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
-          # 先初始化cmake生成_deps目录
           cmake -S . -B build/cp39-cp39-win_amd64
-          # 定义源、目标路径
           $srcSchema = "build/cp39-cp39-win_amd64/_deps/mkf-src/PEAS/schemas"
-          $dstOutput = "$src/outputs"
-          # 把schemas根所有文件复制到output文件夹（lossElementPerHarmonic同级）
-          Copy-Item "$srcSchema/*" -Destination "$dstOutput" -Recurse -Force
-          Write-Host "Copied all schema files to outputs folder for relative ref fix"
+          $dstOutput = "$srcSchema/outputs"
+          Copy-Item "$srcSchema/*" "$dstOutput" -Recurse -Force
 
-      - name: Build wheel (无多余cmake参数，规避变量未使用警告)
+      - name: Build wheel
         run: |
           $env:CMAKE_CXX_STANDARD = "23"
           $env:CMAKE_CXX_STANDARD_REQUIRED = "ON"
@@ -68,7 +59,6 @@ jobs:
           $env:MAKEFLAGS = "-j2"
           $env:CMAKE_FETCHCONTENT_UPDATES_DISCONNECTED = "ON"
           $env:QUICKTYPE_ALLOW_REMOTE_SCHEMA = "false"
-          # 不再传递PEAS_SCHEMA变量，消除unused警告
           python -m build --wheel -Ccmake.define=CMAKE_CXX_STANDARD=23 -Ccmake.define=CMAKE_CXX_STANDARD_REQUIRED=ON
 
       - name: Upload built wheel artifact
